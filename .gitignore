@@ -1,0 +1,10 @@
+# Derived install targets (install skills with install.ps1 / install.sh)
+.agents/skills/
+.agents/plugins/
+.claude/
+.opencode/
+.superpowers/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
