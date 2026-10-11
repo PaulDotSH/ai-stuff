@@ -1,0 +1,14 @@
+{
+  "name": "ai-stuff",
+  "description": "Portable AI agent skills and a project-instruction template, installable across Claude Code, Codex, opencode, and Antigravity.",
+  "owner": {
+    "name": "PaulDotSH"
+  },
+  "plugins": [
+    {
+      "name": "ai-stuff",
+      "source": "./",
+      "description": "Portable AI agent skills: brainstorming, dispatching-parallel-agents, requesting/receiving-code-review, codebase-design, grilling, handoff, to-questionnaire, improve-codebase-architecture, frontend-design, ponytail, remotion-motion-graphics, unity-mcp-skill."
+    }
+  ]
+}

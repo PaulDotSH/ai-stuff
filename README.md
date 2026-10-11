@@ -103,6 +103,8 @@ or `rtk init -g --uninstall` for the global hooks. Requires `rtk` on PATH.
 | improve-codebase-architecture | Scan a codebase for deepening opportunities, report them as HTML, then grill through the chosen one. Locally modified. | [mattpocock/skills](https://github.com/mattpocock/skills/tree/main/skills/engineering/improve-codebase-architecture) |
 | frontend-design             | Distinctive, intentional visual design for new or reshaped UI — avoids templated AI defaults. | [anthropics/skills](https://github.com/anthropics/skills/tree/main/skills/frontend-design) |
 | ponytail                    | Forces the laziest working solution (YAGNI → stdlib → native → existing dep → one line). Opt-in mode; locally modified. | [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail) |
+| remotion-motion-graphics    | Create/edit motion-graphics videos with Remotion (springs, stagger, grade, grain, captions) and a mandatory render→inspect→fix loop. Locally modified. | [haidrrrry/claude-remotion-skill](https://github.com/haidrrrry/claude-remotion-skill) |
+| unity-mcp-skill             | Orchestrate the Unity Editor through MCP for Unity tools/resources — scenes, GameObjects, scripts, tests. | [CoplayDev/unity-mcp](https://github.com/CoplayDev/unity-mcp) |
 
 `brainstorming` references a `writing-plans` skill for its architectural path
 and a `visual-companion` browser server (Node.js) for visual questions. Those

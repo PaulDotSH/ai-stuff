@@ -1,0 +1,9 @@
+{
+  "name": "ai-stuff",
+  "version": "1.0.0",
+  "description": "Portable AI agent skills for Claude Code, Codex, opencode, and Antigravity, plus a project-instruction template.",
+  "author": {
+    "name": "PaulDotSH"
+  },
+  "agents": []
+}

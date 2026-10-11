@@ -115,6 +115,8 @@ only, cheap models for subagents, and per-harness polling cadence.
 | improve-codebase-architecture | https://github.com/mattpocock/skills (skills/engineering/improve-codebase-architecture) | Locally modified: scope boundary vs `codebase-design`/`brainstorming`; codebase walk obeys the subagent policy; manual invocation. |
 | frontend-design             | https://github.com/anthropics/skills (skills/frontend-design) | Upstream, unchanged. |
 | ponytail                    | https://github.com/DietrichGebert/ponytail (skills/ponytail) | Locally modified: scoped as an opt-in mode against the AGENTS.md baseline; harness-command assumptions removed. |
+| remotion-motion-graphics    | https://github.com/haidrrrry/claude-remotion-skill (remotion-motion-graphics) | Locally modified: render/still from a single `remotion bundle --out-dir build` instead of the entry file, so each run stops leaving a multi-GB `%TEMP%emotion-webpack-bundle-*` copy of `public/`. Ships a `.skill` bundle for Claude Desktop; render-inspect loop depends on ffmpeg/Remotion being installed. |
+| unity-mcp-skill             | https://github.com/CoplayDev/unity-mcp | Upstream, unchanged. Installed and kept in sync by the MCP for Unity package (`.unity-mcp-skill-sync` marker); frontmatter name is `unity-mcp-orchestrator`. |
 
 ## Command output
 
