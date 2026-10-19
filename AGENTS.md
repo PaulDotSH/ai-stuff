@@ -27,6 +27,8 @@ ai-stuff/
       SKILL.md              # required
       scripts/              # optional helpers
       *.md                  # optional references
+  tools/
+    DEPLOY.md             # manifest of machine-local tools; rest is gitignored
   install.ps1               # Windows installer
   install.sh                # macOS/Linux installer
 ```

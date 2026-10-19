@@ -8,3 +8,7 @@
 # OS / editor cruft
 .DS_Store
 Thumbs.db
+
+# Machine-local tool installs; only the manifest is tracked
+tools/*
+!tools/DEPLOY.md
