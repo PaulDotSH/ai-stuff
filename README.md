@@ -64,6 +64,11 @@ pwsh -File install.ps1 -Harness all -Scope project -Agents -ProjectDir C:\path\t
 
 Preview with `-DryRun` / `--dry-run`; overwrite with `-Force` / `--force`.
 
+On Windows, a global install (`-Scope global`) also sets the user environment
+variable `PYTHONUTF8=1` if it isn't set. Without it Python writes stdout as cp1252,
+and agents crash with `UnicodeEncodeError` when printing non-ASCII text. Isolated
+runs (`python -I`) ignore the variable, so pass `python -X utf8` there.
+
 ## Project template
 
 `agents/AGENTS.md` is the template installed into a new repository root. It

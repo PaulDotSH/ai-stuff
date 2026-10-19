@@ -170,5 +170,21 @@ if ($Agents) {
   Write-Host ""
 }
 
+# Windows Python defaults stdout to cp1252, so agents printing non-ASCII text
+# (e.g. Romanian transcripts) crash with UnicodeEncodeError. Make UTF-8 the
+# user-wide default once. Note: python -I ignores it; use python -X utf8 there.
+if ($Scope -eq 'global') {
+  $current = [Environment]::GetEnvironmentVariable('PYTHONUTF8', 'User')
+  if ($current -eq '1') {
+    Write-Host "PYTHONUTF8: already set"
+  } elseif ($DryRun) {
+    Write-Host "PYTHONUTF8: plan set to 1 (user env)"
+  } else {
+    [Environment]::SetEnvironmentVariable('PYTHONUTF8', '1', 'User')
+    Write-Host "PYTHONUTF8: set to 1 (user env; open a new terminal)"
+  }
+  Write-Host ""
+}
+
 if ($DryRun) { Write-Host "Dry run complete. No files were changed." }
 else { Write-Host "Done." }
