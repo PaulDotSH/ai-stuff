@@ -43,6 +43,13 @@ Prebuilt Windows releases ship CPU, BLAS and CUDA builds only. This machine has
 an AMD GPU, so GPU acceleration needs a local Vulkan build
 (`-DGGML_VULKAN=ON`, requires the Vulkan SDK).
 
+## Reverse-engineering tools (provided by REA)
+
+Ghidra, rizin, jadx, apktool, jadx-headless-mcp, wabt and the other RE tools
+are installed by the REA (reverse-engineer-anything) setup and wired into its
+MCP config. Do not deploy them here and do not vendor copies into projects;
+point projects at the REA-installed tools instead.
+
 ## Global prerequisites (installed outside this folder)
 
 Not managed here, listed so a new machine has everything:
