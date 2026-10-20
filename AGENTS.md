@@ -8,6 +8,7 @@ be copied or linked into the skill directory of any harness.
 
 - `skills/` — portable `SKILL.md` packages (the actual content).
 - `agents/` — portable project-instruction template installed into new repos.
+- `notes/` — reference notes distilled from external material; read, not installed.
 - `AGENTS.md` — this file, the canonical project/agent instructions.
 - `CLAUDE.md` — one-line import of `AGENTS.md` for Claude Code.
 - `install.ps1` / `install.sh` — install skills and the project template.
@@ -22,6 +23,8 @@ ai-stuff/
   agents/
     AGENTS.md             # portable template installed into new repos
     CLAUDE.md             # @AGENTS.md import for Claude Code
+  notes/
+    *.md                  # reference notes (not installed anywhere)
   skills/
     <skill-name>/
       SKILL.md              # required

@@ -14,6 +14,8 @@ ai-stuff/
   agents/
     AGENTS.md    # portable project-instruction template for new repos
     CLAUDE.md    # @AGENTS.md import for Claude Code
+  notes/
+    *.md         # reference notes, e.g. postgres-performance-design.md
   skills/
     <name>/
       SKILL.md   # required — name + description frontmatter
