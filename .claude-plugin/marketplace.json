@@ -8,7 +8,7 @@
     {
       "name": "ai-stuff",
       "source": "./",
-      "description": "Portable AI agent skills: brainstorming, dispatching-parallel-agents, requesting/receiving-code-review, codebase-design, grilling, handoff, to-questionnaire, improve-codebase-architecture, frontend-design, ponytail, remotion-motion-graphics, unity-mcp-skill."
+      "description": "Portable AI agent skills: brainstorming, dispatching-parallel-agents, requesting/receiving-code-review, codebase-design, grilling, handoff, to-questionnaire, improve-codebase-architecture, frontend-design, ponytail, remotion-motion-graphics, unity-mcp-skill, rust-webdev, and Postgres skills (schema design, safe migrations, autovacuum, query tuning, connection pooling, replication/HA, backup/recovery, upgrades, monitoring, server tuning)."
     }
   ]
 }

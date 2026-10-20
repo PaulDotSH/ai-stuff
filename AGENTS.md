@@ -8,7 +8,6 @@ be copied or linked into the skill directory of any harness.
 
 - `skills/` — portable `SKILL.md` packages (the actual content).
 - `agents/` — portable project-instruction template installed into new repos.
-- `notes/` — reference notes distilled from external material; read, not installed.
 - `AGENTS.md` — this file, the canonical project/agent instructions.
 - `CLAUDE.md` — one-line import of `AGENTS.md` for Claude Code.
 - `install.ps1` / `install.sh` — install skills and the project template.
@@ -23,8 +22,6 @@ ai-stuff/
   agents/
     AGENTS.md             # portable template installed into new repos
     CLAUDE.md             # @AGENTS.md import for Claude Code
-  notes/
-    *.md                  # reference notes (not installed anywhere)
   skills/
     <skill-name>/
       SKILL.md              # required
@@ -122,6 +119,8 @@ only, cheap models for subagents, and per-harness polling cadence.
 | ponytail                    | https://github.com/DietrichGebert/ponytail (skills/ponytail) | Locally modified: scoped as an opt-in mode against the AGENTS.md baseline; harness-command assumptions removed. |
 | remotion-motion-graphics    | https://github.com/haidrrrry/claude-remotion-skill (remotion-motion-graphics) | Locally modified: render/still from a single `remotion bundle --out-dir build` instead of the entry file, so each run stops leaving a multi-GB `%TEMP%emotion-webpack-bundle-*` copy of `public/`. Ships a `.skill` bundle for Claude Desktop; render-inspect loop depends on ffmpeg/Remotion being installed. |
 | unity-mcp-skill             | https://github.com/CoplayDev/unity-mcp | Upstream, unchanged. Installed and kept in sync by the MCP for Unity package (`.unity-mcp-skill-sync` marker); frontmatter name is `unity-mcp-orchestrator`. |
+| postgres-* (10 skills)      | Original, distilled from *Scaling Postgres* transcripts, episodes 1–439 | `postgres-schema-design`, `-safe-migrations`, `-autovacuum`, `-query-tuning`, `-connection-pooling`, `-replication-ha`, `-backup-recovery`, `-upgrades`, `-monitoring`, `-server-tuning`. Each has `SKILL.md` plus a cited reference file (`[NNN]` = episode). Citations were spot-checked against the transcripts; numbers are workload-specific examples. |
+| rust-webdev                 | Original | Conventions distilled from the maintainer's own axum/diesel-async services (patterns, not copied code). `SKILL.md` playbook plus `reference.md` templates (deadpool and bb8 pools, `AppError`, config, test harness). APIs checked against diesel-async 0.9.2 and bb8 0.9.1. |
 
 ## Command output
 

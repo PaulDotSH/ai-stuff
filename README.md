@@ -14,8 +14,6 @@ ai-stuff/
   agents/
     AGENTS.md    # portable project-instruction template for new repos
     CLAUDE.md    # @AGENTS.md import for Claude Code
-  notes/
-    *.md         # reference notes, e.g. postgres-performance-design.md
   skills/
     <name>/
       SKILL.md   # required — name + description frontmatter
@@ -112,6 +110,21 @@ or `rtk init -g --uninstall` for the global hooks. Requires `rtk` on PATH.
 | ponytail                    | Forces the laziest working solution (YAGNI → stdlib → native → existing dep → one line). Opt-in mode; locally modified. | [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail) |
 | remotion-motion-graphics    | Create/edit motion-graphics videos with Remotion (springs, stagger, grade, grain, captions) and a mandatory render→inspect→fix loop. Locally modified. | [haidrrrry/claude-remotion-skill](https://github.com/haidrrrry/claude-remotion-skill) |
 | unity-mcp-skill             | Orchestrate the Unity Editor through MCP for Unity tools/resources — scenes, GameObjects, scripts, tests. | [CoplayDev/unity-mcp](https://github.com/CoplayDev/unity-mcp) |
+| postgres-schema-design      | Performance-oriented schema design and review: keys, types, JSONB, constraints, indexes, MVCC, partitioning, queues, tenancy. | Original; distilled from [Scaling Postgres](https://www.scalingpostgres.com/) |
+| postgres-safe-migrations    | Write and review migrations that don't block a live database: lock_timeout + retries, NOT VALID, CONCURRENTLY, rewrites, backfills. | Original; distilled from Scaling Postgres |
+| postgres-autovacuum         | Vacuum and autovacuum tuning, bloat detection and removal, freezing and wraparound. | Original; distilled from Scaling Postgres |
+| postgres-query-tuning       | Diagnose slow queries: EXPLAIN, row estimates and statistics, planner pitfalls, generic plans, per-query memory. | Original; distilled from Scaling Postgres |
+| postgres-connection-pooling | Connection limits and pooling: PgBouncer modes and what breaks, pool sizing, alternatives, timeouts. | Original; distilled from Scaling Postgres |
+| postgres-replication-ha     | Streaming and logical replication, slots, lag, standby conflicts, failover tooling. | Original; distilled from Scaling Postgres |
+| postgres-backup-recovery    | Physical backups, WAL archiving, PITR, backup tools, restore testing, corruption checks. | Original; distilled from Scaling Postgres |
+| postgres-upgrades           | Minor releases and major-version upgrades: pg_upgrade, logical-replication cutover, collation changes. | Original; distilled from Scaling Postgres |
+| postgres-monitoring         | What to measure and alert on: pg_stat_statements, wait events, logging, key health metrics. | Original; distilled from Scaling Postgres |
+| postgres-server-tuning      | Instance configuration and hardware: memory, checkpoints and WAL, storage and I/O, OS settings. | Original; distilled from Scaling Postgres |
+| rust-webdev                 | Rust web backends: axum on tokio, diesel-async with a deadpool/bb8 pool, `AppError`, env config, router-level tests; plain data and free functions over OOP layering, no blocking on the runtime. | Original |
+
+The `postgres-*` skills are written from the auto-generated transcripts of the
+*Scaling Postgres* show (episodes 1–439). Each has a `SKILL.md` playbook and a
+cited reference file; `[NNN]` is an episode number.
 
 `brainstorming` references a `writing-plans` skill for its architectural path
 and a `visual-companion` browser server (Node.js) for visual questions. Those
