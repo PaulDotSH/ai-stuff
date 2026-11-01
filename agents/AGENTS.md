@@ -46,6 +46,22 @@ Run the relevant checks before declaring work done.
   wrong behavior. Never weaken a test just to make it pass.
 - Static types, linters, and checkers are part of "done".
 
+## Output-heavy commands
+
+- **Delegate output-heavy commands to a cheap model.** When a command's output
+  is large but the answer you need is small (parsing logs, sifting build or CI
+  output, scanning long dumps), prefer handing it to a cheap subagent and
+  taking back only the conclusion: DeepSeek via the `deepseek` MCP
+  (`run_task`) or Claude Haiku. Give it the exact command and what to report;
+  it reads, it does not edit. This is the one exception to the opt-in rule in
+  "Subagent usage".
+- **Test runs print failures, not passes.** Run suites in a mode that hides
+  passing tests and shows only failures plus the summary: e.g. `cargo test -q`,
+  `cargo nextest run --status-level fail`, `pytest -q`, `vitest --reporter=dot`,
+  `go test ./...` without `-v`, `dotnet test -v q`. If the runner has no such
+  mode, filter its output down to the failures. Never pull hundreds of passing
+  lines into context.
+
 ## Planning
 
 - For large tasks, plan first with a strong model, then implement with cheaper
@@ -63,7 +79,8 @@ the full workflow.
   subagents", "dispatch these in parallel", "delegate this"). A task looking
   parallelizable is not authorization, and neither is a past instruction. If
   parallel work would clearly help, ask once; absent a yes, do the work yourself,
-  sequentially.
+  sequentially. Exception: delegating an output-heavy command to a cheap model
+  (see "Output-heavy commands") needs no opt-in.
 - **Cheap models for subagents.** The coordinating session runs the expensive
   model; helpers run a cheap/fast one: ChatGPT Luna, DeepSeek v4.1 Flash, Claude
   Sonnet, or Muse-Spark. Pick the cheapest that can do the job, never silently a

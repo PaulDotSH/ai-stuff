@@ -100,14 +100,17 @@ The canonical, installable statement of the subagent policy lives in
 `agents/AGENTS.md` — the template dropped into new repositories, so the rules
 survive even when the `dispatching-parallel-agents` skill is not loaded. The
 same three rules apply when working in this repo: explicit developer opt-in
-only, cheap models for subagents, and per-harness polling cadence.
+only, cheap models for subagents, and per-harness polling cadence. Its
+"Output-heavy commands" rules apply here too: delegate log parsing and similar
+commands to a cheap model (DeepSeek MCP or Haiku) without opt-in, and run test
+suites so only failures are printed.
 
 ## Skills
 
 | Skill                       | Source                                                   | Notes |
 | --------------------------- | -------------------------------------------------------- | ----- |
 | brainstorming               | https://github.com/obra/superpowers (skills/brainstorming) | Upstream, unchanged. |
-| dispatching-parallel-agents | https://github.com/obra/superpowers (skills/dispatching-parallel-agents) | Locally modified: explicit developer opt-in gate, cheap-model mandate for subagents, per-harness polling cadence. Changes are marked in the file. |
+| dispatching-parallel-agents | https://github.com/obra/superpowers (skills/dispatching-parallel-agents) | Locally modified: explicit developer opt-in gate (except delegating an output-heavy command to a cheap model), cheap-model mandate for subagents, per-harness polling cadence. Changes are marked in the file. |
 | requesting-code-review      | https://github.com/obra/superpowers (skills/requesting-code-review) | Upstream, unchanged. Dispatches a reviewer, so the subagent opt-in and cheap-model rules in `agents/AGENTS.md` apply. |
 | receiving-code-review       | https://github.com/obra/superpowers (skills/receiving-code-review) | Upstream, unchanged. |
 | codebase-design             | https://github.com/mattpocock/skills (skills/engineering/codebase-design) | Locally modified: scope boundary vs `brainstorming`; DESIGN-IT-TWICE obeys the subagent policy. |

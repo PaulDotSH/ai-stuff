@@ -74,7 +74,9 @@ runs (`python -I`) ignore the variable, so pass `python -X utf8` there.
 `agents/AGENTS.md` is the template installed into a new repository root. It
 carries the project-description/style/testing boilerplate plus the always-on
 **subagent usage** policy (opt-in only, cheap models, per-harness polling
-cadence) — so those rules still apply when the skill is not loaded. `agents/CLAUDE.md`
+cadence) and the **output-heavy commands** rules (log parsing and similar go to
+a cheap model such as DeepSeek via MCP or Haiku; test runs print only failures)
+— so those rules still apply when the skill is not loaded. `agents/CLAUDE.md`
 is a one-line `@AGENTS.md` import for Claude Code.
 
 Install it alongside skills with `-Agents` / `--agents`. It writes `AGENTS.md`

@@ -52,6 +52,10 @@ ask once:
 
 Then wait for the answer. Absent an explicit yes, do the work yourself, in this
 session, sequentially. Dispatching without opt-in is a failure, not initiative.
+
+One exception: handing a single output-heavy command (log parsing, sifting
+build or CI output) to a cheap model — DeepSeek via the `deepseek` MCP or
+Claude Haiku — so only its conclusion comes back needs no opt-in.
 </HARD-GATE>
 
 ## Model Selection
