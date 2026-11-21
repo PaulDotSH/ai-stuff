@@ -124,6 +124,7 @@ suites so only failures are printed.
 | unity-mcp-skill             | https://github.com/CoplayDev/unity-mcp | Upstream, unchanged. Installed and kept in sync by the MCP for Unity package (`.unity-mcp-skill-sync` marker); frontmatter name is `unity-mcp-orchestrator`. |
 | postgres-* (10 skills)      | Original, distilled from *Scaling Postgres* transcripts, episodes 1–439 | `postgres-schema-design`, `-safe-migrations`, `-autovacuum`, `-query-tuning`, `-connection-pooling`, `-replication-ha`, `-backup-recovery`, `-upgrades`, `-monitoring`, `-server-tuning`. Each has `SKILL.md` plus a cited reference file (`[NNN]` = episode). Citations were spot-checked against the transcripts; numbers are workload-specific examples. |
 | rust-webdev                 | Original | Conventions distilled from the maintainer's own axum/diesel-async services (patterns, not copied code). `SKILL.md` playbook plus `reference.md` templates (deadpool and bb8 pools, `AppError`, config, test harness). APIs checked against diesel-async 0.9.2 and bb8 0.9.1. |
+| jellyfin-watched-delete     | Original | `SKILL.md` plus `scripts/` (stdlib-only Python, example config, systemd user units). Tested against Jellyfin 12.4, Sonarr 4.0, Radarr 6.4, Seerr 3.5 and the qBittorrent WebUI API v2. Secrets stay in a local `config.json`/`jellyfin.token` that is never committed. |
 
 ## Command output
 

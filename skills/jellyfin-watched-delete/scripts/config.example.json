@@ -1,0 +1,16 @@
+{
+ "settings": {
+  "jellyfin_url": "http://127.0.0.1:8096",
+  "jellyfin_token_file": "jellyfin.token",
+  "sonarr_url": "http://127.0.0.1:8989/api/v3",
+  "radarr_url": "http://127.0.0.1:7878/api/v3",
+  "seerr_url": "http://127.0.0.1:5055/api/v1",
+  "qbittorrent_url": "http://127.0.0.1:8080/api/v2",
+  "downloads_dir": "/media/downloads"
+ },
+ "delay_seconds": 3600,
+ "rules": [
+  {"users": ["alice"], "series": ["Example Show"], "movies": [{"title": "Example Movie", "year": 2021}]},
+  {"users": ["alice", "bob"], "series": ["Show Both Watch"], "movies": []}
+ ]
+}

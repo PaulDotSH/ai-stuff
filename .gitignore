@@ -12,3 +12,8 @@ Thumbs.db
 # Machine-local tool installs; only the manifest is tracked
 tools/*
 !tools/DEPLOY.md
+
+# watched-delete local runtime files (secrets / personal state)
+skills/jellyfin-watched-delete/scripts/config.json
+skills/jellyfin-watched-delete/scripts/state.json
+skills/jellyfin-watched-delete/scripts/*.token

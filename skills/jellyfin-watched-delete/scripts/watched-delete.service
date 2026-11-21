@@ -1,0 +1,7 @@
+# Install: copy to ~/.config/systemd/user/ and point ExecStart at the installed script.
+[Unit]
+Description=Delete media after configured Jellyfin users finish it
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/watched-delete/watched_delete.py --apply

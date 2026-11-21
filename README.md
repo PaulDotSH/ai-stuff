@@ -123,6 +123,7 @@ or `rtk init -g --uninstall` for the global hooks. Requires `rtk` on PATH.
 | postgres-monitoring         | What to measure and alert on: pg_stat_statements, wait events, logging, key health metrics. | Original; distilled from Scaling Postgres |
 | postgres-server-tuning      | Instance configuration and hardware: memory, checkpoints and WAL, storage and I/O, OS settings. | Original; distilled from Scaling Postgres |
 | rust-webdev                 | Rust web backends: axum on tokio, diesel-async with a deadpool/bb8 pool, `AppError`, env config, router-level tests; plain data and free functions over OOP layering, no blocking on the runtime. | Original |
+| jellyfin-watched-delete     | Timer-driven script that deletes allowlisted episodes/movies after given Jellyfin users watch them: Sonarr/Radarr delete + unmonitor, qBittorrent torrent removed with its data (season packs once fully watched), Seerr cleanup. | Original |
 
 The `postgres-*` skills are written from the auto-generated transcripts of the
 *Scaling Postgres* show (episodes 1–439). Each has a `SKILL.md` playbook and a
