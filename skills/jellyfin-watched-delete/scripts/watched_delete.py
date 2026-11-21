@@ -5,8 +5,10 @@ Scope is an allowlist in config.json (next to this script):
   {"delay_seconds": 3600,
    "rules": [{"users": ["alice"], "series": ["Example Show"],
               "movies": [{"title": "Example Movie", "year": 2021}]}]}
-An item is deleted once EVERY user listed in its rule has it marked played. Nothing outside
-the rules is ever touched.
+An item is deleted once EVERY user listed in its rule has it marked played ("match": "all",
+the default) or once ANY of them has ("match": "any", set with --any). A series entry is a
+name or {"name": ..., "seasons": [1, 2]} to limit it to some seasons. Nothing outside the
+rules is ever touched.
 
 For each finished item, once DELAY seconds have passed since it was first seen as finished:
   1. Episodes: Sonarr stops monitoring the episode and deletes its library file.
@@ -14,9 +16,10 @@ For each finished item, once DELAY seconds have passed since it was first seen a
   2. Every qBittorrent torrent for the item is removed with its data (the entry, not just the
      files, so nothing shows as missing/broken or re-downloads). Torrents are found from the
      arr's grab/import history (downloadId) and from the library file's hardlink inode.
-     Single-video torrents (plus .nfo/.txt/subs junk < 50 MB) go immediately. A torrent with
-     several videos (season pack) is remembered in state.json "packs" and removed once none of
-     its videos is still hardlinked into the library.
+     Single-video torrents (plus .nfo/.txt/subs junk < 50 MB) are deleted with their data. A
+     torrent with several videos (season pack) is removed from qBittorrent WITHOUT its data as
+     soon as its first video is deleted; only the deleted item's own downloads copy is unlinked,
+     the other episodes' files stay on disk (they are hardlinks of the library files).
   3. Any leftover /media/downloads hardlink to the same inode is unlinked.
   4. Movies: the Seerr media row is deleted after Jellyfin has dropped the item.
 
@@ -30,8 +33,9 @@ Usage:
   watched_delete.py                      dry run: print the plan, change nothing
   watched_delete.py --apply              act (the systemd user timer uses this)
   watched_delete.py list                 show rules
-  watched_delete.py add-series USER "Series Name"     (USER may be "a,b" = all must watch)
-  watched_delete.py add-movie  USER "Title" YEAR
+  watched_delete.py add-series USER "Series Name" [--any] [--seasons 1,2]
+                       USER may be "a,b": all of them must watch it, or any one with --any
+  watched_delete.py add-movie  USER "Title" YEAR [--any]
   watched_delete.py remove-series USER "Series Name"
   watched_delete.py remove-movie  USER "Title" YEAR
 """
@@ -149,16 +153,25 @@ def jf_users():
     return {u['Name'].lower(): u['Id'] for u in jf('/Users')}
 
 
-def rule_for(cfg, users, create=False):
+def rule_for(cfg, users, match='all', create=False):
     key = sorted(u.lower() for u in users)
     for r in cfg['rules']:
-        if sorted(u.lower() for u in r['users']) == key:
+        if sorted(u.lower() for u in r['users']) == key and r.get('match', 'all') == match:
             return r
     if not create:
         return None
-    r = {'users': key, 'series': [], 'movies': []}
+    r = {'users': key, 'match': match, 'series': [], 'movies': []}
     cfg['rules'].append(r)
     return r
+
+
+def series_name(e):
+    return e if isinstance(e, str) else e['name']
+
+
+def rule_title(r):
+    j = ' OR ' if r.get('match', 'all') == 'any' else ' + '
+    return j.join(r['users'])
 
 
 def parse_users(s):
@@ -173,14 +186,15 @@ def parse_users(s):
 def cmd_list(cfg):
     print(f"delay: {cfg['delay_seconds']} s")
     for r in cfg['rules']:
-        print(f"users {' + '.join(r['users'])}:")
+        print(f"users {rule_title(r)}:")
         for s in r['series']:
-            print(f'   series: {s}')
+            seasons = '' if isinstance(s, str) else f" (seasons {', '.join(map(str, s['seasons']))})"
+            print(f'   series: {series_name(s)}{seasons}')
         for m in r['movies']:
             print(f"   movie:  {m['title']} ({m['year']})")
 
 
-def cmd_add_series(cfg, users, name):
+def cmd_add_series(cfg, users, name, match='all', seasons=None):
     hits = jf(f'/Items?Recursive=true&IncludeItemTypes=Series&SearchTerm={urllib.parse.quote(name)}')['Items']
     exact = [h['Name'] for h in hits if h['Name'].lower() == name.lower()]
     if not exact:
@@ -188,32 +202,32 @@ def cmd_add_series(cfg, users, name):
     name = exact[0]
     if not [s for s in sonarr('GET', '/series') if s['title'] == name]:
         print(f'warning: Sonarr has no series titled {name!r}; its episodes will be skipped until it does')
-    r = rule_for(cfg, users, create=True)
-    if name not in r['series']:
-        r['series'].append(name)
+    r = rule_for(cfg, users, match, create=True)
+    r['series'] = [e for e in r['series'] if series_name(e) != name]
+    r['series'].append({'name': name, 'seasons': seasons} if seasons else name)
     save_config(cfg)
-    print(f"added series {name!r} for {' + '.join(r['users'])}")
+    print(f"added series {name!r}{f' seasons {seasons}' if seasons else ''} for {rule_title(r)}")
 
 
-def cmd_add_movie(cfg, users, title, year):
+def cmd_add_movie(cfg, users, title, year, match='all'):
     hits = jf(f'/Items?Recursive=true&IncludeItemTypes=Movie&Fields=ProductionYear&SearchTerm={urllib.parse.quote(title)}')['Items']
     exact = [h for h in hits if h['Name'].lower() == title.lower() and h.get('ProductionYear') == year]
     if not exact:
         sys.exit(f'no Jellyfin movie {title!r} ({year}); matches: {[(h["Name"], h.get("ProductionYear")) for h in hits]}')
     title = exact[0]['Name']
-    r = rule_for(cfg, users, create=True)
+    r = rule_for(cfg, users, match, create=True)
     if not any(m['title'] == title and m['year'] == year for m in r['movies']):
         r['movies'].append({'title': title, 'year': year})
     save_config(cfg)
-    print(f"added movie {title!r} ({year}) for {' + '.join(r['users'])}")
+    print(f"added movie {title!r} ({year}) for {rule_title(r)}")
 
 
-def cmd_remove(cfg, users, kind, name, year=None):
-    r = rule_for(cfg, users)
+def cmd_remove(cfg, users, kind, name, year=None, match='all'):
+    r = rule_for(cfg, users, match)
     if not r:
-        sys.exit('no rule for those users')
+        sys.exit(f"no {'--any ' if match == 'any' else ''}rule for those users")
     if kind == 'series':
-        r['series'] = [s for s in r['series'] if s.lower() != name.lower()]
+        r['series'] = [s for s in r['series'] if series_name(s).lower() != name.lower()]
     else:
         r['movies'] = [m for m in r['movies'] if not (m['title'].lower() == name.lower() and m['year'] == year)]
     if not r['series'] and not r['movies']:
@@ -239,7 +253,11 @@ def played(uid):
 
 def in_rule(it, r):
     if it.get('Type') == 'Episode':
-        return it.get('SeriesName') in r['series']
+        for e in r['series']:
+            if series_name(e) == it.get('SeriesName'):
+                if isinstance(e, str) or it.get('ParentIndexNumber') in e.get('seasons', []):
+                    return True
+        return False
     if it.get('Type') == 'Movie':
         return any(it.get('Name') == m['title'] and it.get('ProductionYear') == m['year'] for m in r['movies'])
     return False
@@ -261,9 +279,14 @@ def finished_items(cfg):
             sets.append(cache[uid])
         if not sets:
             continue
-        common = set(sets[0]).intersection(*sets[1:])
-        for iid in common:
-            it = sets[0][iid]
+        if r.get('match', 'all') == 'any':
+            pool = {}
+            for st_ in sets:
+                pool.update(st_)
+        else:
+            common = set(sets[0]).intersection(*sets[1:])
+            pool = {i: sets[0][i] for i in common}
+        for iid, it in pool.items():
             if in_rule(it, r):
                 keep[iid] = it
     return list(keep.values())
@@ -320,9 +343,9 @@ def plan_for(lib_path, history_hashes, idx_ino, idx_t):
             if c == lib_path:
                 continue
             h = by_path.get(c)
-            if h is None:
-                unlink.append(c)
-            else:
+            if h is None or len(media_files(idx_t[h])) > 1:
+                unlink.append(c)   # orphan copy, or this item's copy inside a season pack
+            if h is not None:
                 cands.add(h)
     remove, packs = [], []
     for h in sorted(cands):
@@ -331,37 +354,37 @@ def plan_for(lib_path, history_hashes, idx_ino, idx_t):
     return {'torrents': remove, 'packs': packs, 'unlink': unlink}
 
 
-def remove_torrents_and_copies(plan, st, apply):
+def cleanup_dir(d):
+    """Remove a downloads subfolder left with only junk files (or nothing)."""
+    root = os.path.abspath(S['downloads_dir'])
+    while d and os.path.abspath(d).startswith(root + os.sep) and os.path.isdir(d):
+        entries = [os.path.join(d, e) for e in os.listdir(d)]
+        if any(os.path.isdir(e) or not is_junk(e, os.path.getsize(e)) for e in entries):
+            return
+        for e in entries:
+            print(f'    downloads junk: unlink {e}')
+            os.remove(e)
+        print(f'    downloads dir: rmdir {d}')
+        os.rmdir(d)
+        d = os.path.dirname(d)
+
+
+def remove_torrents_and_copies(plan, idx_t, apply):
     for h, name in plan['torrents']:
         print(f'    torrent: remove + delete data: {name}')
         if apply:
             qbt_post('/torrents/delete', {'hashes': h, 'deleteFiles': 'true'})
+        idx_t.pop(h, None)
     for h, name in plan['packs']:
-        print(f'    multi-episode torrent: removed once none of its videos is left in the library: {name}')
-        st['packs'][h] = name
+        print(f'    season-pack torrent: remove from qBittorrent, keep files on disk: {name}')
+        if apply:
+            qbt_post('/torrents/delete', {'hashes': h, 'deleteFiles': 'false'})
+        idx_t.pop(h, None)
     for c in plan['unlink']:
         print(f'    downloads copy: unlink {c}')
         if apply:
             os.remove(c)
-
-
-def sweep_packs(st, idx_t, apply):
-    """Remove a multi-episode torrent once every video in it has no library hardlink left
-    (nlink == 1 means only the torrent's own copy exists), or its data is already gone."""
-    for h, name in list(st['packs'].items()):
-        t = idx_t.get(h)
-        if t is None:
-            print(f'pack: already gone from qBittorrent: {name}')
-            del st['packs'][h]
-            continue
-        left = [p for p in media_files(t) if os.path.exists(p) and os.stat(p).st_nlink > 1]
-        if left:
-            print(f'pack: waiting, {len(left)} video(s) still in the library: {name}')
-            continue
-        print(f'pack: remove + delete data: {name}')
-        if apply:
-            qbt_post('/torrents/delete', {'hashes': h, 'deleteFiles': 'true'})
-            del st['packs'][h]
+            cleanup_dir(os.path.dirname(c))
 
 
 def act_episode(it, idx_ino, idx_t, st, apply):
@@ -390,7 +413,7 @@ def act_episode(it, idx_ino, idx_t, st, apply):
             sonarr('DELETE', f"/episodefile/{files[0]['id']}")
     else:
         print('    library file already gone')
-    remove_torrents_and_copies(plan, st, apply)
+    remove_torrents_and_copies(plan, idx_t, apply)
     return 'done', 'ok'
 
 
@@ -406,7 +429,7 @@ def act_movie(it, idx_ino, idx_t, st, apply):
     m = movies[0]
     hist = radarr('GET', f"/history/movie?movieId={m['id']}")
     plan = plan_for(lib, [r.get('downloadId') for r in hist], idx_ino, idx_t)
-    remove_torrents_and_copies(plan, st, apply)
+    remove_torrents_and_copies(plan, idx_t, apply)
     print(f"    radarr: delete movie {m['id']} with files ({lib})")
     if apply:
         radarr('DELETE', f"/movie/{m['id']}?deleteFiles=true&addImportExclusion=false")
@@ -426,7 +449,8 @@ def load_state():
         st = json.load(open(STATE_FILE))
     else:
         st = {}
-    for k, v in (('skip', []), ('seen', {}), ('done', {}), ('seerr_pending', {}), ('packs', {})):
+    st.pop('packs', None)  # old format: season packs used to wait; now removed right away
+    for k, v in (('skip', []), ('seen', {}), ('done', {}), ('seerr_pending', {})):
         st.setdefault(k, v)
     return st
 
@@ -476,8 +500,6 @@ def run(apply):
             if it['Type'] == 'Movie' and len(res) > 3 and res[2]:
                 st['seerr_pending'][str(res[2])] = {'t': now, 'dir': res[3]}
 
-    sweep_packs(st, torrent_index() if apply else idx_t, apply)
-
     for tmdb, info in list(st['seerr_pending'].items()):
         if 'seerr' not in K:
             del st['seerr_pending'][tmdb]
@@ -505,17 +527,24 @@ def main():
     if not a:
         return run('--apply' in sys.argv)
     cfg = load_config()
+    match = 'any' if '--any' in a else 'all'
+    seasons = None
+    if '--seasons' in a:
+        i = a.index('--seasons')
+        seasons = sorted({int(x) for x in a[i + 1].split(',')})
+        del a[i:i + 2]
+    a = [x for x in a if x != '--any']
     cmd = a[0]
     if cmd == 'list':
         return cmd_list(cfg)
     if cmd == 'add-series' and len(a) == 3:
-        return cmd_add_series(cfg, parse_users(a[1]), a[2])
+        return cmd_add_series(cfg, parse_users(a[1]), a[2], match, seasons)
     if cmd == 'add-movie' and len(a) == 4:
-        return cmd_add_movie(cfg, parse_users(a[1]), a[2], int(a[3]))
+        return cmd_add_movie(cfg, parse_users(a[1]), a[2], int(a[3]), match)
     if cmd == 'remove-series' and len(a) == 3:
-        return cmd_remove(cfg, parse_users(a[1]), 'series', a[2])
+        return cmd_remove(cfg, parse_users(a[1]), 'series', a[2], match=match)
     if cmd == 'remove-movie' and len(a) == 4:
-        return cmd_remove(cfg, parse_users(a[1]), 'movie', a[2], int(a[3]))
+        return cmd_remove(cfg, parse_users(a[1]), 'movie', a[2], int(a[3]), match)
     sys.exit(__doc__)
 
 

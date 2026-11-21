@@ -10,7 +10,47 @@
  },
  "delay_seconds": 3600,
  "rules": [
-  {"users": ["alice"], "series": ["Example Show"], "movies": [{"title": "Example Movie", "year": 2021}]},
-  {"users": ["alice", "bob"], "series": ["Show Both Watch"], "movies": []}
+  {
+   "users": [
+    "alice"
+   ],
+   "match": "all",
+   "series": [
+    "Example Show"
+   ],
+   "movies": [
+    {
+     "title": "Example Movie",
+     "year": 2021
+    }
+   ]
+  },
+  {
+   "users": [
+    "alice",
+    "bob"
+   ],
+   "match": "all",
+   "series": [
+    "Show Both Must Watch"
+   ],
+   "movies": []
+  },
+  {
+   "users": [
+    "alice",
+    "bob"
+   ],
+   "match": "any",
+   "series": [
+    {
+     "name": "Show Either Can Watch",
+     "seasons": [
+      1
+     ]
+    }
+   ],
+   "movies": []
+  }
  ]
 }

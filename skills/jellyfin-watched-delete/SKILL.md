@@ -14,9 +14,11 @@ description: >
 # Jellyfin watched-delete
 
 `scripts/watched_delete.py` (Python 3 stdlib only) deletes allowlisted media
-once **every** user named in its rule has it marked played in Jellyfin. Each
-item is deleted `delay_seconds` (default 3600) after it is first seen played,
-so a user can still rewind or rewatch the ending.
+once the users named in its rule have it marked played in Jellyfin: **all** of
+them by default (AND), or **any one** of them when the rule was added with
+`--any` (OR). Use OR only when the user explicitly asks for "either"/"any of";
+otherwise use AND. Each item is deleted `delay_seconds` (default 3600) after it
+is first seen played, so a user can still rewind or rewatch the ending.
 
 ## Install
 
@@ -43,10 +45,12 @@ so a user can still rewind or rewatch the ending.
 ```
 watched_delete.py list
 watched_delete.py add-series alice "Show Name"       # exact Jellyfin series name, validated
-watched_delete.py add-series alice,bob "Show Name"   # deleted only after BOTH watched
-watched_delete.py add-movie  alice "Title" 2021
-watched_delete.py remove-series alice "Show Name"
-watched_delete.py remove-movie  alice "Title" 2021
+watched_delete.py add-series alice,bob "Show Name"   # AND: deleted only after BOTH watched
+watched_delete.py add-series alice,bob "Show Name" --any          # OR: either one watching is enough
+watched_delete.py add-series alice "Show Name" --seasons 1,2      # only those seasons
+watched_delete.py add-movie  alice "Title" 2021 [--any]
+watched_delete.py remove-series alice "Show Name" [--any]        # --any picks the OR rule
+watched_delete.py remove-movie  alice "Title" 2021 [--any]
 watched_delete.py            # dry run: prints the plan, changes nothing
 watched_delete.py --apply    # what the timer runs
 ```
@@ -66,13 +70,15 @@ protect specific items, put their Jellyfin item IDs in `state.json` `"skip"`.
    - the arr's grab/import history (`downloadId` = torrent hash). This still
      works when the library file is already gone or is a copy, not a hardlink.
    - torrents whose files share an inode with the library file (hardlinks).
-   A torrent with one video file goes immediately. Small junk files next to it
-   (.nfo, .txt, images, subtitles, each under 50 MB) do not count as videos. A
-   torrent with several videos, such as a season pack, is saved under
-   `state.json` `"packs"` and deleted once none of its videos is still
-   hardlinked into the library (`st_nlink == 1`).
-3. Copies of the same file left in `downloads_dir` that belong to no torrent
-   are unlinked.
+   A torrent with one video file is deleted with its data. Small junk files
+   next to it (.nfo, .txt, images, subtitles, each under 50 MB) do not count as
+   videos. A torrent with several videos, such as a season pack, is removed
+   from qBittorrent **without** its data as soon as its first video is deleted.
+   Only the deleted episode's own downloads copy is unlinked; the other
+   episodes stay on disk as hardlinks of their library files.
+3. Copies of the item left in `downloads_dir` that belong to no torrent (for
+   example the rest of an already-removed season pack) are unlinked. A
+   downloads folder left holding only junk files is removed.
 
 ## Debugging
 
@@ -82,7 +88,5 @@ protect specific items, put their Jellyfin item IDs in `state.json` `"skip"`.
   title. Both must match exactly.
 - `finished items in scope: 0` right after a deletion is normal. Jellyfin
   drops the item once its library scan sees that the file is gone.
-- `pack: waiting, N video(s) still in the library`: other episodes of the
-  pack have not been watched or deleted yet.
 - State lives in `state.json` next to `config.json`: `seen` (first time the
-  item was seen played), `done`, `skip`, `packs`, `seerr_pending`.
+  item was seen played), `done`, `skip`, `seerr_pending`.
