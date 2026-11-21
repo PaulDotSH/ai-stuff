@@ -321,7 +321,8 @@ copy_unprivileged() {
 
   echo "== all host systemd units (regular files; enablement is listed in inventory.txt) =="
   mkdir -p "$B/configs/systemd/etc-system"
-  rsync -a --delete --no-links /etc/systemd/system/ "$B/configs/systemd/etc-system/" 2>/dev/null \
+  rsync -aq --delete --no-links --exclude '*.wants/' --exclude '*.requires/' \
+        /etc/systemd/system/ "$B/configs/systemd/etc-system/" 2>/dev/null \
     || echo "  (WARN: some units unreadable)"
   echo "  units: $(find "$B/configs/systemd/etc-system" -type f | wc -l) file(s)"
 
