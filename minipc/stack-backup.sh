@@ -19,7 +19,7 @@
 #
 # Root-only groups (skipped when unprivileged): Authelia /etc/authelia,
 # trawl MITM CA key, Stalwart/SnappyMail docker volumes, ntfy + uptime-kuma state,
-# the cloudflare-ddns token. The root half ends by handing the whole
+# the cloudflare-ddns token, cleanuparr's data-protection keys. The root half ends by handing the whole
 # folder back to the owner (root-owned leftovers made user-level refreshes skip files).
 #
 # Code vs backup: this script and the minipc's own scripts live in the ai-stuff repo
@@ -152,10 +152,13 @@ copy_root_only() {
   copy_cfg "$B/configs/lol-coach" /etc/lol-coach/server.toml /etc/systemd/system/lol-coach-server.service
   chmod -R go-rwx "$B/databases/lol-coach" "$B/configs/lol-coach" 2>/dev/null || true
 
-  echo "== root secrets (cloudflare-ddns token) =="
-  mkdir -p "$B/configs/ddns"
+  echo "== root secrets (cloudflare-ddns token, cleanuparr data-protection keys) =="
+  mkdir -p "$B/configs/ddns" "$B/configs/arrs/cleanuparr/DataProtection-Keys"
   copy_cfg "$B/configs/ddns" /etc/cloudflare-ddns/token
   chmod 600 "$B/configs/ddns/token" 2>/dev/null || true
+  rsync -a --delete /usr/lib/cleanuparr/config/DataProtection-Keys/ \
+        "$B/configs/arrs/cleanuparr/DataProtection-Keys/" 2>/dev/null || true
+  chmod -R go-rwx "$B/configs/arrs/cleanuparr" 2>/dev/null || true
 
   # Hand everything back to the owner: modes stay go-rwx where set above, but a root-owned
   # dir inside a user-level group (seen: hermes skills, notes/research) makes the next
@@ -252,7 +255,9 @@ copy_unprivileged() {
   # /usr/lib/cleanuparr/config (DBs + DataProtection-Keys, which decrypt its stored API keys)
   if [ -d /usr/lib/cleanuparr/config ]; then
     mkdir -p "$B/configs/arrs/cleanuparr"
-    rsync -a --delete --exclude 'logs/' /usr/lib/cleanuparr/config/ "$B/configs/arrs/cleanuparr/" || true
+    # its key files are 0600 → copied by the root half; excluded here so --delete keeps them
+    rsync -a --delete --exclude 'logs/' --exclude 'DataProtection-Keys/' \
+          /usr/lib/cleanuparr/config/ "$B/configs/arrs/cleanuparr/" || true
     chmod -R go-rwx "$B/configs/arrs/cleanuparr" 2>/dev/null || true
     echo "  cleanuparr: $(find "$B/configs/arrs/cleanuparr" -type f | wc -l) files"
   fi
