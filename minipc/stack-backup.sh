@@ -19,7 +19,7 @@
 #
 # Root-only groups (skipped when unprivileged): Authelia /etc/authelia,
 # trawl MITM CA key, Stalwart/SnappyMail docker volumes, ntfy + uptime-kuma state,
-# cleanuparr, the cloudflare-ddns token. The root half ends by handing the whole
+# the cloudflare-ddns token. The root half ends by handing the whole
 # folder back to the owner (root-owned leftovers made user-level refreshes skip files).
 #
 # Code vs backup: this script and the minipc's own scripts live in the ai-stuff repo
@@ -152,13 +152,6 @@ copy_root_only() {
   copy_cfg "$B/configs/lol-coach" /etc/lol-coach/server.toml /etc/systemd/system/lol-coach-server.service
   chmod -R go-rwx "$B/databases/lol-coach" "$B/configs/lol-coach" 2>/dev/null || true
 
-  echo "== cleanuparr (config + db; logs skipped) =="
-  if [ -d /var/lib/cleanuparr ]; then
-    mkdir -p "$B/configs/arrs/cleanuparr"
-    rsync -a --delete --exclude 'logs/' --exclude '*.log' /var/lib/cleanuparr/ "$B/configs/arrs/cleanuparr/" || true
-    echo "  cleanuparr: $(find "$B/configs/arrs/cleanuparr" -type f | wc -l) file(s)"
-  fi
-
   echo "== root secrets (cloudflare-ddns token) =="
   mkdir -p "$B/configs/ddns"
   copy_cfg "$B/configs/ddns" /etc/cloudflare-ddns/token
@@ -237,7 +230,7 @@ copy_unprivileged() {
   cp -p "$MH/services/jocuri-foarte-top/jocuri.env" "$B/configs/jocuri/" 2>/dev/null || echo "  (skip jocuri.env)"
 
   echo "== arrs (configs + DBs only) =="
-  for app in sonarr radarr lidarr prowlarr bazarr seerr jackett slskd profilarr cleanuparr; do
+  for app in sonarr radarr lidarr prowlarr bazarr seerr jackett slskd profilarr; do
     src="/var/lib/$app"; dst="$B/configs/arrs/$app"
     [ -d "$src" ] || { echo "  (skip $app)"; continue; }
     mkdir -p "$dst"
@@ -255,6 +248,14 @@ copy_unprivileged() {
     fi
     echo "  $app: $(find "$dst" -type f 2>/dev/null | wc -l) files"
   done
+  # cleanuparr keeps nothing in /var/lib/cleanuparr: the AUR unit writes to
+  # /usr/lib/cleanuparr/config (DBs + DataProtection-Keys, which decrypt its stored API keys)
+  if [ -d /usr/lib/cleanuparr/config ]; then
+    mkdir -p "$B/configs/arrs/cleanuparr"
+    rsync -a --delete --exclude 'logs/' /usr/lib/cleanuparr/config/ "$B/configs/arrs/cleanuparr/" || true
+    chmod -R go-rwx "$B/configs/arrs/cleanuparr" 2>/dev/null || true
+    echo "  cleanuparr: $(find "$B/configs/arrs/cleanuparr" -type f | wc -l) files"
+  fi
 
   echo "== jellyfin (state only; no cache/metadata/backups) =="
   if [ -e /var/lib/jellyfin ]; then
