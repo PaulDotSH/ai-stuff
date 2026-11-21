@@ -19,7 +19,7 @@
 #
 # Root-only groups (skipped when unprivileged): Authelia /etc/authelia,
 # trawl MITM CA key, Stalwart/SnappyMail docker volumes, ntfy + uptime-kuma state,
-# the cloudflare-ddns token, cleanuparr's data-protection keys. The root half ends by handing the whole
+# the cloudflare-ddns token, /etc/new-songs.env, cleanuparr's data-protection keys. The root half ends by handing the whole
 # folder back to the owner (root-owned leftovers made user-level refreshes skip files).
 #
 # Code vs backup: this script and the minipc's own scripts live in the ai-stuff repo
@@ -152,10 +152,12 @@ copy_root_only() {
   copy_cfg "$B/configs/lol-coach" /etc/lol-coach/server.toml /etc/systemd/system/lol-coach-server.service
   chmod -R go-rwx "$B/databases/lol-coach" "$B/configs/lol-coach" 2>/dev/null || true
 
-  echo "== root secrets (cloudflare-ddns token, cleanuparr data-protection keys) =="
-  mkdir -p "$B/configs/ddns" "$B/configs/arrs/cleanuparr/DataProtection-Keys"
+  echo "== root secrets (cloudflare-ddns token, new-songs env, cleanuparr data-protection keys) =="
+  mkdir -p "$B/configs/ddns" "$B/configs/new-songs" "$B/configs/arrs/cleanuparr/DataProtection-Keys"
   copy_cfg "$B/configs/ddns" /etc/cloudflare-ddns/token
   chmod 600 "$B/configs/ddns/token" 2>/dev/null || true
+  copy_cfg "$B/configs/new-songs" /etc/new-songs.env /opt/new-songs/.env
+  chmod -R go-rwx "$B/configs/new-songs" 2>/dev/null || true
   rsync -a --delete /usr/lib/cleanuparr/config/DataProtection-Keys/ \
         "$B/configs/arrs/cleanuparr/DataProtection-Keys/" 2>/dev/null || true
   chmod -R go-rwx "$B/configs/arrs/cleanuparr" 2>/dev/null || true
