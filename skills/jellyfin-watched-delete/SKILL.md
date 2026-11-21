@@ -76,7 +76,11 @@ protect specific items, put their Jellyfin item IDs in `state.json` `"skip"`.
    from qBittorrent **without** its data as soon as its first video is deleted.
    Only the deleted episode's own downloads copy is unlinked; the other
    episodes stay on disk as hardlinks of their library files.
-3. Copies of the item left in `downloads_dir` that belong to no torrent (for
+3. **Media no arr manages** (the title is missing from Sonarr/Radarr, e.g. a
+   hand-linked torrent): the library file and its same-name sidecars
+   (.srt/.ass/.nfo/thumbs) are deleted directly, the torrent rules above
+   apply, and a Jellyfin library refresh is triggered.
+4. Copies of the item left in `downloads_dir` that belong to no torrent (for
    example the rest of an already-removed season pack) are unlinked. A
    downloads folder left holding only junk files is removed.
 
@@ -84,8 +88,10 @@ protect specific items, put their Jellyfin item IDs in `state.json` `"skip"`.
 
 - Logs: `journalctl --user -u watched-delete.service`. A `skip:` line names
   the reason, and the item is retried on every run.
-- `Sonarr series not found`: the Jellyfin series name differs from the Sonarr
-  title. Both must match exactly.
+- A Jellyfin series name that differs from the Sonarr title is treated as
+  unmanaged, so its files are deleted directly and Sonarr is not told. Both
+  names must match exactly; `add-series` prints a note when Sonarr has no such
+  title.
 - `finished items in scope: 0` right after a deletion is normal. Jellyfin
   drops the item once its library scan sees that the file is gone.
 - State lives in `state.json` next to `config.json`: `seen` (first time the

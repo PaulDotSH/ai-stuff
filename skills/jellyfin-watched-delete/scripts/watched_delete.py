@@ -22,6 +22,9 @@ For each finished item, once DELAY seconds have passed since it was first seen a
      the other episodes' files stay on disk (they are hardlinks of the library files).
   3. Any leftover /media/downloads hardlink to the same inode is unlinked.
   4. Movies: the Seerr media row is deleted after Jellyfin has dropped the item.
+  Media that no arr manages (title absent from Sonarr/Radarr, e.g. a hand-linked torrent):
+  the library file and its same-name sidecars are deleted directly, steps 2-3 apply, and a
+  Jellyfin library refresh is triggered.
 
 Items whose Jellyfin IDs are listed in state.json "skip" are never deleted.
 Already-watched episodes of a newly added series ARE deleted (after DELAY).
@@ -82,8 +85,8 @@ def http(method, url, headers=None, body=None, form=None):
     return raw
 
 
-def jf(path):
-    return http('GET', S['jellyfin_url'] + path, headers={'Authorization': f'MediaBrowser Token="{K["jellyfin"]}"'})
+def jf(path, method='GET'):
+    return http(method, S['jellyfin_url'] + path, headers={'Authorization': f'MediaBrowser Token="{K["jellyfin"]}"'})
 
 
 def load_settings():
@@ -201,7 +204,7 @@ def cmd_add_series(cfg, users, name, match='all', seasons=None):
         sys.exit(f'no Jellyfin series named {name!r}; close matches: {[h["Name"] for h in hits]}')
     name = exact[0]
     if not [s for s in sonarr('GET', '/series') if s['title'] == name]:
-        print(f'warning: Sonarr has no series titled {name!r}; its episodes will be skipped until it does')
+        print(f'note: Sonarr has no series titled {name!r}; its files will be deleted directly (not arr-managed)')
     r = rule_for(cfg, users, match, create=True)
     r['series'] = [e for e in r['series'] if series_name(e) != name]
     r['series'].append({'name': name, 'seasons': seasons} if seasons else name)
@@ -387,11 +390,32 @@ def remove_torrents_and_copies(plan, idx_t, apply):
             cleanup_dir(os.path.dirname(c))
 
 
+def delete_unmanaged(it, idx_ino, idx_t, apply):
+    """Media no arr manages (e.g. a hand-linked torrent): delete the library file and its
+    same-name sidecars (.srt/.ass/.nfo/-thumb.jpg...) directly, then let Jellyfin rescan."""
+    lib = it['Path']
+    plan = plan_for(lib, [], idx_ino, idx_t)
+    if os.path.exists(lib):
+        d, stem = os.path.dirname(lib), os.path.splitext(os.path.basename(lib))[0]
+        side = [os.path.join(d, f) for f in os.listdir(d)
+                if f != os.path.basename(lib) and f.startswith(stem) and is_junk(f, os.path.getsize(os.path.join(d, f)))]
+        for f in [lib] + side:
+            print(f'    not managed by an arr: unlink {f}')
+            if apply:
+                os.remove(f)
+    else:
+        print('    library file already gone')
+    remove_torrents_and_copies(plan, idx_t, apply)
+    return 'done', 'ok (unmanaged)', None, None, True
+
+
 def act_episode(it, idx_ino, idx_t, st, apply):
     lib = it['Path']
     series = [s for s in sonarr('GET', '/series') if s['title'] == it['SeriesName']]
+    if not series:
+        return delete_unmanaged(it, idx_ino, idx_t, apply)
     if len(series) != 1:
-        return 'skip', f"Sonarr series not found for {it['SeriesName']}"
+        return 'skip', f"several Sonarr series titled {it['SeriesName']}"
     sid = series[0]['id']
     eps = [e for e in sonarr('GET', f'/episode?seriesId={sid}')
            if e['seasonNumber'] == it.get('ParentIndexNumber') and e['episodeNumber'] == it.get('IndexNumber')]
@@ -422,10 +446,10 @@ def act_movie(it, idx_ino, idx_t, st, apply):
     if 'radarr' not in K:
         return 'skip', 'Radarr not configured'
     movies = [m for m in radarr('GET', '/movie') if m['title'] == it['Name'] and m['year'] == it.get('ProductionYear')]
+    if not movies:
+        return delete_unmanaged(it, idx_ino, idx_t, apply)
     if len(movies) != 1:
-        if not os.path.exists(lib):
-            return 'done', 'library file already gone, movie not in Radarr'
-        return 'skip', 'Radarr movie not found'
+        return 'skip', 'several Radarr movies match'
     m = movies[0]
     hist = radarr('GET', f"/history/movie?movieId={m['id']}")
     plan = plan_for(lib, [r.get('downloadId') for r in hist], idx_ino, idx_t)
@@ -479,6 +503,7 @@ def run(apply):
     pending = [it for it in items if it['Id'] not in skip and it['Id'] not in done]
     idx_t = torrent_index()
     idx_ino = downloads_by_inode() if pending else {}
+    rescan = False
     for it in sorted(pending, key=label):
         iid = it['Id']
         age = now - seen[iid]
@@ -497,8 +522,14 @@ def run(apply):
         print(f'    -> {res[0]}: {res[1]}')
         if res[0] == 'done':
             done[iid] = now
-            if it['Type'] == 'Movie' and len(res) > 3 and res[2]:
+            if len(res) > 4 and res[4]:
+                rescan = True
+            if it['Type'] == 'Movie' and len(res) > 3 and res[2] and res[3]:
                 st['seerr_pending'][str(res[2])] = {'t': now, 'dir': res[3]}
+
+    if rescan and apply:
+        print('jellyfin: library refresh')
+        jf('/Library/Refresh', 'POST')
 
     for tmdb, info in list(st['seerr_pending'].items()):
         if 'seerr' not in K:
