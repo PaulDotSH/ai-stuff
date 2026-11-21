@@ -39,6 +39,10 @@ is first seen played, so a user can still rewind or rewatch the ending.
    `~/.config/systemd/user/`, fix the `ExecStart` path, then run
    `systemctl --user daemon-reload && systemctl --user enable --now watched-delete.timer`.
    Run `loginctl enable-linger <user>` so the timer runs without an open session.
+   Optionally install `scripts/watched-delete-config.path` too
+   (`systemctl --user enable --now watched-delete-config.path`). It starts a run
+   as soon as `config.json` changes. Nothing ever needs a restart, because every
+   run re-reads the config.
 
 ## Managing rules
 
@@ -56,6 +60,13 @@ watched_delete.py --apply    # what the timer runs
 ```
 
 After adding a rule, run the dry run and show the user what it will delete.
+Rules remove themselves once their media is completely deleted:
+- **movie:** gone from Jellyfin and Radarr.
+- **Sonarr series:** every in-scope episode has no file and is unmonitored. A
+  series-wide rule also needs Sonarr status `ended`, so an airing show keeps its
+  rule for future episodes.
+- **unmanaged series:** no episode file is left.
+
 **Adding a series also deletes episodes the users had already watched.** To
 protect specific items, put their Jellyfin item IDs in `state.json` `"skip"`.
 
@@ -82,7 +93,13 @@ protect specific items, put their Jellyfin item IDs in `state.json` `"skip"`.
    apply, and a Jellyfin library refresh is triggered.
 4. Copies of the item left in `downloads_dir` that belong to no torrent (for
    example the rest of an already-removed season pack) are unlinked. A
-   downloads folder left holding only junk files is removed.
+   downloads folder left holding only junk files is removed. A removed season
+   pack's folder is deleted whole, extras included, once none of its videos is
+   still in the library (`state.json` `"pack_dirs"`).
+5. Unmanaged media only: once the last video of a season or series is gone,
+   its library folder is deleted along with any leftover extras, posters and
+   .nfo files. It never goes above the folder Jellyfin reports for the
+   series, and never touches a library root.
 
 ## Debugging
 
@@ -95,4 +112,6 @@ protect specific items, put their Jellyfin item IDs in `state.json` `"skip"`.
 - `finished items in scope: 0` right after a deletion is normal. Jellyfin
   drops the item once its library scan sees that the file is gone.
 - State lives in `state.json` next to `config.json`: `seen` (first time the
-  item was seen played), `done`, `skip`, `seerr_pending`.
+  item was seen played), `done`, `skip`, `seerr_pending`, `pack_dirs`.
+- `rule complete, removing: ...` in the log means the entry was dropped from
+  `config.json` on purpose. Re-add it if more media for it arrives later.

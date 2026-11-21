@@ -22,6 +22,12 @@ For each finished item, once DELAY seconds have passed since it was first seen a
      the other episodes' files stay on disk (they are hardlinks of the library files).
   3. Any leftover /media/downloads hardlink to the same inode is unlinked.
   4. Movies: the Seerr media row is deleted after Jellyfin has dropped the item.
+  5. A removed season pack's downloads folder is deleted whole (extras included) once none
+     of its videos is still in the library.
+  6. A series/movie entry is dropped from config.json once it is completely deleted: movie
+     gone from Jellyfin and Radarr; Sonarr series with every in-scope episode fileless and
+     unmonitored (series-wide rules also need status "ended"); unmanaged series with no
+     episode file left. Empty rules are dropped too.
   Media that no arr manages (title absent from Sonarr/Radarr, e.g. a hand-linked torrent):
   the library file and its same-name sidecars are deleted directly, steps 2-3 apply, and a
   Jellyfin library refresh is triggered.
@@ -42,7 +48,7 @@ Usage:
   watched_delete.py remove-series USER "Series Name"
   watched_delete.py remove-movie  USER "Title" YEAR
 """
-import json, os, re, sqlite3, sys, time, urllib.parse, urllib.request
+import json, os, re, shutil, sqlite3, sys, time, urllib.parse, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.environ.get('WATCHED_DELETE_CONFIG', os.path.join(HERE, 'config.json'))
@@ -318,7 +324,7 @@ def torrent_index():
     idx = {}
     for t in qbt_get('/torrents/info'):
         files = qbt_get('/torrents/files?hash=' + t['hash'])
-        idx[t['hash'].lower()] = {'name': t['name'],
+        idx[t['hash'].lower()] = {'name': t['name'], 'content_path': t.get('content_path', ''),
                                   'files': [(os.path.join(t['save_path'], f['name']), f['size']) for f in files]}
     return idx
 
@@ -372,7 +378,7 @@ def cleanup_dir(d):
         d = os.path.dirname(d)
 
 
-def remove_torrents_and_copies(plan, idx_t, apply):
+def remove_torrents_and_copies(plan, idx_t, apply, st=None):
     for h, name in plan['torrents']:
         print(f'    torrent: remove + delete data: {name}')
         if apply:
@@ -380,8 +386,11 @@ def remove_torrents_and_copies(plan, idx_t, apply):
         idx_t.pop(h, None)
     for h, name in plan['packs']:
         print(f'    season-pack torrent: remove from qBittorrent, keep files on disk: {name}')
+        cp = idx_t.get(h, {}).get('content_path', '')
         if apply:
             qbt_post('/torrents/delete', {'hashes': h, 'deleteFiles': 'false'})
+            if st is not None and cp and os.path.isdir(cp) and in_downloads(cp):
+                st['pack_dirs'][cp] = name
         idx_t.pop(h, None)
     for c in plan['unlink']:
         print(f'    downloads copy: unlink {c}')
@@ -390,7 +399,7 @@ def remove_torrents_and_copies(plan, idx_t, apply):
             cleanup_dir(os.path.dirname(c))
 
 
-def delete_unmanaged(it, idx_ino, idx_t, apply):
+def delete_unmanaged(it, idx_ino, idx_t, st, apply):
     """Media no arr manages (e.g. a hand-linked torrent): delete the library file and its
     same-name sidecars (.srt/.ass/.nfo/-thumb.jpg...) directly, then let Jellyfin rescan."""
     lib = it['Path']
@@ -405,15 +414,96 @@ def delete_unmanaged(it, idx_ino, idx_t, apply):
                 os.remove(f)
     else:
         print('    library file already gone')
-    remove_torrents_and_copies(plan, idx_t, apply)
+    remove_torrents_and_copies(plan, idx_t, apply, st)
+    if apply:
+        cleanup_library(it, lib)
     return 'done', 'ok (unmanaged)', None, None, True
+
+
+def has_video(d):
+    for root, _, files in os.walk(d):
+        for f in files:
+            fp = os.path.join(root, f)
+            try:
+                if not is_junk(f, os.path.getsize(fp)):
+                    return True
+            except OSError:
+                pass
+    return False
+
+
+def cleanup_library(it, lib):
+    """Unmanaged media only: once its last video is gone, delete the season folder and then
+    the series/movie folder with whatever extras are left (posters, nfo, Extras/...).
+    Never goes above the folder Jellyfin reports for the series/movie."""
+    top = None
+    if it['Type'] == 'Episode' and it.get('SeriesId'):
+        try:
+            top = jf(f"/Items?Ids={it['SeriesId']}&Fields=Path")['Items'][0].get('Path')
+        except Exception:
+            top = None
+    elif it['Type'] == 'Movie':
+        top = os.path.dirname(lib)
+    if not top or not os.path.isdir(top):
+        return
+    top = os.path.abspath(top)
+    roots = library_roots()
+    if not roots or any(top == r or r.startswith(top + os.sep) for r in roots):
+        return  # never delete a library root (or anything above one)
+    d = os.path.abspath(os.path.dirname(lib))
+    if not (d == top or d.startswith(top + os.sep)):
+        return
+    while True:
+        if os.path.isdir(d) and not has_video(d):
+            print(f'    library: last video gone, remove folder {d}')
+            shutil.rmtree(d)
+        if d == top:
+            return
+        d = os.path.dirname(d)
+
+
+def library_roots():
+    try:
+        return {os.path.abspath(l) for v in jf('/Library/VirtualFolders') for l in v.get('Locations', [])}
+    except Exception:
+        return set()
+
+
+def in_downloads(p):
+    root = os.path.abspath(S['downloads_dir'])
+    return os.path.abspath(p).startswith(root + os.sep)
+
+
+def sweep_pack_dirs(st, idx_t, apply):
+    """A removed season pack's downloads folder goes (extras included) once none of its
+    videos is still hardlinked into the library and no torrent uses it any more."""
+    for d, name in list(st['pack_dirs'].items()):
+        if not os.path.isdir(d):
+            del st['pack_dirs'][d]
+            continue
+        if any(p.startswith(d + os.sep) for t in idx_t.values() for p, _ in t['files']):
+            print(f'pack folder: in use by a torrent again, keep: {d}')
+            continue
+        linked = []
+        for root, _, files in os.walk(d):
+            for f in files:
+                fp = os.path.join(root, f)
+                if not is_junk(f, os.path.getsize(fp)) and os.stat(fp).st_nlink > 1:
+                    linked.append(fp)
+        if linked:
+            print(f'pack folder: waiting, {len(linked)} video(s) still in the library: {name}')
+            continue
+        print(f'pack folder: last episode gone, remove {d}')
+        if apply:
+            shutil.rmtree(d)
+            del st['pack_dirs'][d]
 
 
 def act_episode(it, idx_ino, idx_t, st, apply):
     lib = it['Path']
     series = [s for s in sonarr('GET', '/series') if s['title'] == it['SeriesName']]
     if not series:
-        return delete_unmanaged(it, idx_ino, idx_t, apply)
+        return delete_unmanaged(it, idx_ino, idx_t, st, apply)
     if len(series) != 1:
         return 'skip', f"several Sonarr series titled {it['SeriesName']}"
     sid = series[0]['id']
@@ -437,7 +527,7 @@ def act_episode(it, idx_ino, idx_t, st, apply):
             sonarr('DELETE', f"/episodefile/{files[0]['id']}")
     else:
         print('    library file already gone')
-    remove_torrents_and_copies(plan, idx_t, apply)
+    remove_torrents_and_copies(plan, idx_t, apply, st)
     return 'done', 'ok'
 
 
@@ -447,13 +537,13 @@ def act_movie(it, idx_ino, idx_t, st, apply):
         return 'skip', 'Radarr not configured'
     movies = [m for m in radarr('GET', '/movie') if m['title'] == it['Name'] and m['year'] == it.get('ProductionYear')]
     if not movies:
-        return delete_unmanaged(it, idx_ino, idx_t, apply)
+        return delete_unmanaged(it, idx_ino, idx_t, st, apply)
     if len(movies) != 1:
         return 'skip', 'several Radarr movies match'
     m = movies[0]
     hist = radarr('GET', f"/history/movie?movieId={m['id']}")
     plan = plan_for(lib, [r.get('downloadId') for r in hist], idx_ino, idx_t)
-    remove_torrents_and_copies(plan, idx_t, apply)
+    remove_torrents_and_copies(plan, idx_t, apply, st)
     print(f"    radarr: delete movie {m['id']} with files ({lib})")
     if apply:
         radarr('DELETE', f"/movie/{m['id']}?deleteFiles=true&addImportExclusion=false")
@@ -468,13 +558,70 @@ def jellyfin_has_path(prefix):
         con.close()
 
 
+def entry_complete(kind, e, sonarr_series, radarr_movies):
+    """True once nothing is left to delete for this rule entry and nothing more will arrive."""
+    if kind == 'movie':
+        hits = jf('/Items?Recursive=true&IncludeItemTypes=Movie&Fields=Path,ProductionYear&SearchTerm='
+                  + urllib.parse.quote(e['title']))['Items']
+        alive = [h for h in hits if h['Name'] == e['title'] and h.get('ProductionYear') == e['year']
+                 and h.get('Path') and os.path.exists(h['Path'])]
+        in_radarr = [m for m in radarr_movies if m['title'] == e['title'] and m['year'] == e['year']]
+        return not alive and not in_radarr
+    name = series_name(e)
+    seasons = None if isinstance(e, str) else set(e.get('seasons', []))
+    ss = [x for x in sonarr_series if x['title'] == name]
+    if len(ss) == 1:
+        eps = [x for x in sonarr('GET', f"/episode?seriesId={ss[0]['id']}")
+               if seasons is None or x['seasonNumber'] in seasons]
+        if not eps or any(x['hasFile'] or x['monitored'] for x in eps):
+            return False
+        return seasons is not None or ss[0].get('status') == 'ended'
+    if ss:
+        return False
+    hits = jf('/Items?Recursive=true&IncludeItemTypes=Series&SearchTerm=' + urllib.parse.quote(name))['Items']
+    for h in hits:
+        if h['Name'] != name:
+            continue
+        for ep in jf(f"/Shows/{h['Id']}/Episodes?Fields=Path").get('Items', []):
+            if (seasons is None or ep.get('ParentIndexNumber') in seasons) and ep.get('Path') and os.path.exists(ep['Path']):
+                return False
+    return True
+
+
+def prune_rules(cfg, apply):
+    """Drop series/movie entries that are completely deleted; drop rules left empty."""
+    sonarr_series = sonarr('GET', '/series')
+    radarr_movies = radarr('GET', '/movie') if 'radarr' in K else []
+    changed = False
+    for r in list(cfg['rules']):
+        for kind, key in (('series', 'series'), ('movie', 'movies')):
+            keep = []
+            for e in r[key]:
+                try:
+                    done_ = entry_complete(kind, e, sonarr_series, radarr_movies)
+                except Exception as ex:
+                    print(f'rule check error ({e}): {type(ex).__name__}: {ex}')
+                    done_ = False
+                if done_:
+                    label_ = series_name(e) if kind == 'series' else f"{e['title']} ({e['year']})"
+                    print(f'rule complete, removing: {label_} for {rule_title(r)}')
+                    changed = True
+                else:
+                    keep.append(e)
+            r[key] = keep
+        if not r['series'] and not r['movies']:
+            cfg['rules'].remove(r)
+    if changed and apply:
+        save_config(cfg)
+
+
 def load_state():
     if os.path.exists(STATE_FILE):
         st = json.load(open(STATE_FILE))
     else:
         st = {}
     st.pop('packs', None)  # old format: season packs used to wait; now removed right away
-    for k, v in (('skip', []), ('seen', {}), ('done', {}), ('seerr_pending', {})):
+    for k, v in (('skip', []), ('seen', {}), ('done', {}), ('seerr_pending', {}), ('pack_dirs', {})):
         st.setdefault(k, v)
     return st
 
@@ -530,6 +677,9 @@ def run(apply):
     if rescan and apply:
         print('jellyfin: library refresh')
         jf('/Library/Refresh', 'POST')
+
+    sweep_pack_dirs(st, torrent_index() if apply else idx_t, apply)
+    prune_rules(cfg, apply)
 
     for tmdb, info in list(st['seerr_pending'].items()):
         if 'seerr' not in K:

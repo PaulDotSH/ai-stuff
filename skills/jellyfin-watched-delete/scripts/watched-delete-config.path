@@ -1,0 +1,11 @@
+# Optional: run watched-delete as soon as config.json changes (rule added/removed),
+# instead of waiting for the next timer tick. Fix the path, install next to the timer.
+[Unit]
+Description=Run watched-delete as soon as its config.json changes
+
+[Path]
+PathChanged=%h/watched-delete/config.json
+Unit=watched-delete.service
+
+[Install]
+WantedBy=default.target
