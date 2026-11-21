@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""country-guard-mint — build the IP->country table used by the edge-ban pipeline.
+
+Output: ~/services/cloudflare/country-guard/ranges.json
+    {"built": iso, "src": feed,
+     "countries": {"RU": ["1.2.3.0/24", ...], ...},   # gated countries (scoring only)
+     "whitelist": {"RO": ["5.2.0.0/16", ...]}}        # never-ban countries (hard guard)
+
+Source: ipdeny aggregated IPv4 zones (free, weekly refresh, plain CIDR text). GeoLite2 was
+tried and dropped: only downloadable via a git.io redirect (3.4 MB, licence, no self-serve
+refresh) and it ships a binary tree rather than the CIDR text these tools want.
+
+The whitelist is what keeps Romanian visitors safe: caddy-banip refuses to write any ban
+that overlaps RO space, so an automated ban can never hit a legitimate RO client.
+"""
+from __future__ import annotations
+
+import ipaddress
+import json
+import sys
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+OUT = Path.home() / "services/cloudflare/country-guard/ranges.json"
+FEED = "https://www.ipdeny.com/ipblocks/data/aggregated/{cc}-aggregated.zone"
+COUNTRIES = ["RU", "CN", "HK", "BY", "IR", "KP", "VN", "ID", "PK", "BD", "NG", "UA"]
+WHITELIST = ["RO"]
+UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) country-guard/1.0 (+homelab)"}
+
+
+def fetch(cc: str) -> list[str]:
+    req = urllib.request.Request(FEED.format(cc=cc.lower()), headers=UA)
+    body = urllib.request.urlopen(req, timeout=45).read().decode()
+    rows = [l.strip() for l in body.splitlines() if l.strip() and not l.startswith("#")]
+    out = []
+    for r in rows:
+        try:
+            n = ipaddress.ip_network(r)
+        except ValueError:
+            continue
+        if n.version == 4:
+            out.append(str(n))
+    return out
+
+
+def main(argv):
+    report = "--report" in argv
+    countries, whitelist, total = {}, {}, 0
+    for cc in COUNTRIES:
+        countries[cc] = fetch(cc)
+        total += len(countries[cc])
+        print(f"{cc}: {len(countries[cc])} ranges")
+    for cc in WHITELIST:
+        whitelist[cc] = fetch(cc)
+        print(f"{cc} (whitelist): {len(whitelist[cc])} ranges")
+    print(f"total gated ranges: {total}")
+    if total < 25000:
+        print(f"REFUSING to write: only {total} ranges (feed looks broken)")
+        return 1
+    if report:
+        return 0
+    payload = {"built": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+               "src": "ipdeny.com aggregated zones",
+               "countries": countries, "whitelist": whitelist}
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    tmp = OUT.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, separators=(",", ":")))
+    tmp.replace(OUT)
+    print("wrote", OUT, OUT.stat().st_size, "bytes")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

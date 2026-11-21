@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# ntfy-push — publish a message to the self-hosted ntfy server (foarte.top stack).
+#
+# usage: ntfy-push [-t title] [-p 1-5] [-g tag1,tag2] [-c click-url] TOPIC [message...]
+#   Body comes from the trailing args, or from stdin when no message args are given.
+#   Auth:  $NTFY_TOKEN if set, else the token in ~/.hermes/ntfy-uptime-kuma-creds.txt
+#   Server: $NTFY_URL, default https://ntfy.foarte.top
+#   Prints the server's JSON response (message id) on success; non-zero exit on failure.
+#
+# example: printf 'clean: 0 HIGH, 0 MEDIUM' | ntfy-push -t 'Cyber analysis' -p 3 -g white_check_mark security
+set -euo pipefail
+
+TITLE=""; PRIO=""; TAGS=""; CLICK=""; MARKDOWN=""
+while getopts "t:p:g:c:m" opt; do
+    case "$opt" in
+        t) TITLE="$OPTARG" ;;
+        p) PRIO="$OPTARG" ;;
+        g) TAGS="$OPTARG" ;;
+        c) CLICK="$OPTARG" ;;
+        m) MARKDOWN="yes" ;;
+        *) echo "usage: ntfy-push [-m] [-t title] [-p 1-5] [-g tags] [-c click] TOPIC [message...]" >&2; exit 2 ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+TOPIC="${1:-}"
+[ -n "$TOPIC" ] || { echo "ntfy-push: topic required" >&2; exit 2; }
+shift || true
+
+if [ "$#" -gt 0 ]; then
+    BODY="$*"
+else
+    BODY="$(cat)"
+fi
+[ -n "$BODY" ] || { echo "ntfy-push: empty body" >&2; exit 2; }
+
+SERVER="${NTFY_URL:-https://ntfy.foarte.top}"
+if [ -z "${NTFY_TOKEN:-}" ]; then
+    CREDS="$HOME/.hermes/ntfy-uptime-kuma-creds.txt"
+    [ -r "$CREDS" ] || { echo "ntfy-push: no token (\$NTFY_TOKEN unset, $CREDS unreadable)" >&2; exit 1; }
+    NTFY_TOKEN="$(awk '/^ntfy token:/{print $3; exit}' "$CREDS")"
+fi
+[ -n "$NTFY_TOKEN" ] || { echo "ntfy-push: could not read token" >&2; exit 1; }
+
+args=(-sS --fail-with-body -H "Authorization: Bearer $NTFY_TOKEN")
+[ -n "$TITLE" ] && args+=(-H "Title: $TITLE")
+[ -n "$PRIO" ]  && args+=(-H "Priority: $PRIO")
+[ -n "$TAGS" ]  && args+=(-H "Tags: $TAGS")
+[ -n "$CLICK" ] && args+=(-H "Click: $CLICK")
+[ -n "$MARKDOWN" ] && args+=(-H "Markdown: yes")
+
+curl "${args[@]}" --data "$BODY" "$SERVER/$TOPIC"
+echo

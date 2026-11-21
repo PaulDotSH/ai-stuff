@@ -20,6 +20,7 @@ ai-stuff/
       ...        # optional scripts/ and references, self-contained
   install.ps1    # Windows installer
   install.sh     # macOS / Linux installer
+  minipc/        # mini PC host scripts + stack-backup.sh, symlinked into place
 ```
 
 `SKILL.md` is an open, agent-neutral format. The only harness-specific detail is

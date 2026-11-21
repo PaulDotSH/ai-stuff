@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# cal-add — create a calendar event in RustiCal (calendar.foarte.top) from the shell.
+#
+#   cal-add "Dentist" 2026-10-25 14:30
+#   cal-add "Film" 2026-10-25 20:00 --end 22:30 --cal personal --desc "IMAX" --alarm 60
+#   cal-add "Pay bill" 2026-10-25 --all-day
+#
+# Times are local (server TZ) and stored as UTC. Prints the object URL on success.
+set -euo pipefail
+
+CREDS=${CAL_CREDS:-$HOME/.hermes/rustical-creds.txt}
+BASE=${CAL_BASE:-https://calendar.foarte.top/caldav/principal/admin}
+TZ_NAME=$(date +%Z)
+
+die() { echo "cal-add: $*" >&2; exit 1; }
+
+title=""; day=""; hour=""; end=""; cal="personal"; desc=""; alarm=""; allday=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --end) end="$2"; shift 2;;
+    --cal) cal="$2"; shift 2;;
+    --desc) desc="$2"; shift 2;;
+    --alarm) alarm="$2"; shift 2;;
+    --all-day) allday=1; shift;;
+    -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    *) if [ -z "$title" ]; then title="$1";
+       elif [ -z "$day" ]; then day="$1";
+       elif [ -z "$hour" ]; then hour="$1";
+       else die "unexpected argument: $1"; fi
+       shift;;
+  esac
+done
+
+[ -n "$title" ] || die "missing title"
+[ -n "$day" ]   || die "missing date (YYYY-MM-DD)"
+[ -f "$CREDS" ] || die "creds file not found: $CREDS"
+TOKEN=$(awk '/app_token_agent-hermes/ {print $2}' "$CREDS")
+[ -n "$TOKEN" ] || die "no agent-hermes app token in $CREDS"
+
+uid="$(date +%s)-$RANDOM$RANDOM@foarte.top"
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/;/\\;/g; s/,/\\,/g'; }
+
+# Fold long lines at 73 octets (RFC 5545). Simple byte-wise fold is fine for our payloads.
+fold() { awk 'BEGIN{ORS=""} {line=$0; while (length(line)>73){print substr(line,1,73) "\r\n "; line=substr(line,74)} print line "\r\n"}'; }
+
+if [ "$allday" = 1 ]; then
+  startprop="DTSTART;VALUE=DATE:$(date -d "$day" +%Y%m%d)"
+  endprop="DTEND;VALUE=DATE:$(date -d "$day +1 day" +%Y%m%d)"
+else
+  [ -n "$hour" ] || die "missing time (HH:MM) or pass --all-day"
+  start_epoch=$(date -d "$day $hour" +%s)
+  if [ -n "$end" ]; then
+    end_epoch=$(date -d "$day $end" +%s)
+  else
+    end_epoch=$((start_epoch + 3600))
+  fi
+  start_utc=$(date -u -d "@$start_epoch" +%Y%m%dT%H%M%SZ)
+  end_utc=$(date -u -d "@$end_epoch" +%Y%m%dT%H%M%SZ)
+  startprop="DTSTART:$start_utc"
+  endprop="DTEND:$end_utc"
+fi
+
+{
+  echo "BEGIN:VCALENDAR"
+  echo "VERSION:2.0"
+  echo "PRODID:-//foarte.top//cal-add//EN"
+  echo "CALSCALE:GREGORIAN"
+  echo "BEGIN:VEVENT"
+  echo "UID:$uid"
+  echo "DTSTAMP:$stamp"
+  echo "$startprop"
+  echo "$endprop"
+  echo "SUMMARY:$(esc "$title")"
+  [ -n "$desc" ] && echo "DESCRIPTION:$(esc "$desc")"
+  echo "TRANSP:OPAQUE"
+  if [ -n "$alarm" ] && [ "$allday" = 0 ]; then
+    echo "BEGIN:VALARM"
+    echo "ACTION:DISPLAY"
+    echo "DESCRIPTION:$(esc "$title")"
+    echo "TRIGGER:-PT${alarm}M"
+    echo "END:VALARM"
+  fi
+  echo "END:VEVENT"
+  echo "END:VCALENDAR"
+} | fold > /tmp/cal-add.$$.ics
+
+url="$BASE/$cal/$uid.ics"
+code=$(curl -sS -u "admin:$TOKEN" -X PUT -H 'Content-Type: text/calendar; charset=utf-8' \
+        --data-binary "@/tmp/cal-add.$$.ics" "$url" -o /tmp/cal-add-resp.$$ -w '%{http_code}')
+rm -f /tmp/cal-add.$$.ics
+if [ "$code" = "201" ] || [ "$code" = "204" ]; then
+  echo "$url"
+else
+  echo "HTTP $code" >&2; cat /tmp/cal-add-resp.$$ >&2; rm -f /tmp/cal-add-resp.$$
+  exit 1
+fi
+rm -f /tmp/cal-add-resp.$$

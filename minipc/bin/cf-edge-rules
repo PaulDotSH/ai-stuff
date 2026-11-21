@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""cf-edge-rules — host-scoped Cloudflare edge protection for the public game vhosts.
+
+Why: the 2026-09-30 floods reached the origin *only* through Cloudflare (the nft origin
+guard saw 0 direct hits), so no origin-side rule can stop them. A request limiter in Caddy
+also can't stop a connection-holding flood — only the edge can refuse to forward it.
+
+What this manages on zone foarte.top (everything tagged "[hermes] " and nothing else):
+
+  WAF custom rules (phase http_request_firewall_custom)
+    [hermes] ban HK scanner fleet          -> block   (zone-wide: AS218785 + 45.138.12.0/24)
+    [hermes] games: challenge non-RO        -> managed_challenge
+    [hermes] games: challenge threat score  -> managed_challenge
+    [hermes] games: block scanner paths     -> block
+
+  Rate limiting rules (phase http_ratelimit)
+    [hermes] games: non-RO rate cap         -> managed_challenge, mitigation 10 min
+    [hermes] games: RO rate cap (optional)  -> block 60 s   (only if the plan allows a 2nd rule)
+
+A Managed Challenge is served entirely at the edge: challenged requests never open an
+origin connection, which is what collapsed the 29k-socket pile-up. It filters the proxy
+fleet (no JS execution) while a human visitor in any country just sees a one-time check.
+
+Modes
+  plan            show zone plan + how many custom/rate-limit rules this account may have
+  list            show current rules in both phases (ours and foreign)
+  dry-run         print the exact API payloads that apply would send (no token needed)
+  apply --yes     upsert our rules, leaving every foreign rule untouched
+  rollback --yes  delete only the rules tagged "[hermes] "
+
+Token: $CF_TOKEN_FILE, else ~/.hermes/cf-waf-token, else /etc/cloudflare-ddns/token
+Needed permissions: Zone:Read + Zone WAF:Edit (the DNS-only token on this box cannot
+write rules — it returns error 10000 on every ruleset call).
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+ZONE_NAME = os.environ.get("CF_ZONE", "foarte.top")
+# zone id for foarte.top (not a secret: shown on the dashboard overview + used in the DDNS log).
+# The WAF token deliberately has no Zone:Read, so /zones cannot be listed — this makes the tool
+# work with least-privilege tokens.
+DEFAULT_ZONE_ID = "1ab72a193742ec1e2f02d8615f4e267a"
+HOSTS = os.environ.get("CF_GAME_HOSTS", "trap.foarte.top jocuri.foarte.top 7.foarte.top").split()
+TAG = "[hermes] "
+API = "https://api.cloudflare.com/client/v4"
+TOKEN_FILES = [os.environ.get("CF_TOKEN_FILE"), "~/.hermes/cf-waf-token",
+               "/etc/cloudflare-ddns/token"]
+UA = "cf-edge-rules/1.0 (+homelab)"
+
+PROBE_PATHS = ["/.env", "/.git/", ".php", "wp-admin", "wp-login", "wp-content", "/vendor/",
+               "/phpmyadmin", "/.aws/", "/.ssh/", "/cgi-bin/", "/xmlrpc.php", "/.well-known/pki-validation"]
+# ACME http-01 must never be challenged: Let's Encrypt's validators are non-RO and would be
+# served a managed challenge (403) at the edge, which breaks every renewal of trap/jocuri.
+ACME_PATH = '/.well-known/acme-challenge/'
+ACME_EXEMPT = f'not (http.request.uri.path contains "{ACME_PATH}")'
+HOST_MATCH = "(http.host in {" + " ".join(f'"{h}"' for h in HOSTS) + "})"
+
+
+def host_expr(extra: str = "") -> str:
+    return f"({HOST_MATCH} and {extra})" if extra else HOST_MATCH
+
+
+def probe_expr() -> str:
+    # the path ORs MUST be parenthesised: `and` binds tighter than `or` in the rules
+    # language, so an ungrouped list would block these paths on EVERY host in the zone.
+    inner = " or ".join(f'(http.request.uri.path contains "{p}")' for p in PROBE_PATHS)
+    return host_expr(f"({inner})")
+
+
+CUSTOM_RULES = [
+    {"description": f"{TAG}ban HK scanner fleet",
+     # Zone-wide (no host scope): the 45.138.12.0/24 scanners hit webmail/mail/auth/uptime,
+     # not just the game vhosts. AS218785 = TC Datacenter Limited (Hong Kong); the /24 is
+     # explicitly listed so the rule keeps working if the ASN lookup is unavailable.
+     "expression": "(ip.geoip.asnum eq 218785) or (ip.src in {45.138.12.0/24})",
+     "action": "block"},
+    {"description": f"{TAG}games: challenge non-RO",
+     "expression": host_expr(f'ip.geoip.country ne "RO" and {ACME_EXEMPT}'),
+     "action": "managed_challenge"},
+    {"description": f"{TAG}games: challenge threat score",
+     "expression": host_expr(f"cf.threat_score gt 10 and {ACME_EXEMPT}"),
+     "action": "managed_challenge"},
+    {"description": f"{TAG}games: block scanner paths",
+     "expression": probe_expr(),
+     "action": "block"},
+]
+
+RATELIMIT_RULES = [
+    {"description": f"{TAG}games: per-IP rate cap",
+     # A Free zone cannot use ip.geoip.country inside a rate-limiting rule ("not entitled:
+     # ip.geoip.country … higher Advanced Rate Limiting plan is required") and pins the period
+     # to 10 s. The country split therefore lives in the custom rules above; this is the
+     # country-agnostic backstop that also catches a flood from Romanian IPs.
+     "expression": host_expr(),
+     # Free forbids managed_challenge here ("not entitled to use the managed_challenge action in
+     # ratelimiting") and pins both the period and the mitigation timeout to 10 s, so this is a
+     # short block; the real protection is the non-RO challenge in the custom rules above.
+     "action": "block",
+     # 100 requests / 10 s per IP per colo: a full page load is a handful of requests, and a
+     # party of players behind one NAT stays well under it, while a flooding IP gets challenged.
+     "ratelimit": {"characteristics": ["cf.colo.id", "ip.src"], "period": 10,
+                   # Free pins the mitigation timeout to 10 s and the period to 10 s — the
+                   # real protection is the non-RO challenge above; this is a backstop.
+                   "requests_per_period": 100, "mitigation_timeout": 10}},
+]
+
+
+def token() -> str:
+    for p in TOKEN_FILES:
+        if not p:
+            continue
+        f = Path(p).expanduser()
+        try:
+            t = f.read_text().strip()
+        except OSError:
+            continue
+        if t:
+            return t
+    sys.exit("no Cloudflare token found (see --help / module docstring)")
+
+
+def api(method: str, path: str, body=None):
+    req = urllib.request.Request(
+        API + path, method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": f"Bearer {token()}", "Content-Type": "application/json",
+                 "User-Agent": UA},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        payload = e.read().decode(errors="replace")
+        try:
+            payload = json.dumps(json.loads(payload), indent=1)
+        except Exception:  # noqa: BLE001
+            pass
+        sys.exit(f"API {method} {path} -> HTTP {e.code}\n{payload}")
+
+
+def api_soft(method: str, path: str, body=None):
+    """Like api() but returns (http_code, body) instead of exiting — used where a plan limit
+    is a normal answer rather than a fatal error."""
+    req = urllib.request.Request(
+        API + path, method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": f"Bearer {token()}", "Content-Type": "application/json",
+                 "User-Agent": UA},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode())
+        except Exception:  # noqa: BLE001
+            return e.code, {}
+
+
+def zone_id() -> str:
+    # CF_ZONE_ID lets a token that carries Zone-WAF rights but no Zone:Read still work
+    # (such a token gets an empty /zones list). The zone id is not a secret — it is on the
+    # dashboard overview page and in the DDNS journal — so a house default is fine here.
+    explicit = os.environ.get("CF_ZONE_ID") or DEFAULT_ZONE_ID
+    if explicit:
+        return explicit.strip()
+    z = api("GET", f"/zones?name={ZONE_NAME}")["result"]
+    if not z:
+        sys.exit(f"zone {ZONE_NAME} not found")
+    return z[0]["id"]
+
+
+def entrypoint(zid: str, phase: str):
+    """Return (ruleset, rules) for a phase entrypoint; ruleset is None if never created."""
+    code, body = api_soft("GET", f"/zones/{zid}/rulesets/phases/{phase}/entrypoint")
+    if code != 200 or not body.get("success"):
+        return None, []
+    rs = body["result"]
+    return rs, rs.get("rules", [])
+
+
+def merged(existing, ours):
+    """Keep every foreign rule untouched; replace ours (matched by description) in place."""
+    keep = [r for r in existing if not str(r.get("description", "")).startswith(TAG)]
+    replaced = len(existing) - len(keep)
+    return keep + ours, replaced
+
+
+def cmd_plan(zid: str) -> None:
+    z = api("GET", f"/zones/{ZONE_NAME}")["result"][0]
+    print(f"zone {ZONE_NAME}  id={z['id']}  plan={z.get('plan', {}).get('name')}  "
+          f"status={z.get('status')}")
+    for phase in ("http_request_firewall_custom", "http_ratelimit"):
+        rs, rules = entrypoint(zid, phase)
+        print(f"  {phase}: ruleset={'yes' if rs else 'none'}  rules={len(rules)} "
+              f"(ours: {sum(1 for r in rules if str(r.get('description','')).startswith(TAG))})")
+    print("\nPlan limits (Free): 5 custom rules, 1 rate-limiting rule. Pro+: 20 custom rules,"
+          " more rate-limiting rules — the RO rate cap is skipped automatically if rejected.")
+
+
+def cmd_list(zid: str) -> None:
+    for phase in ("http_request_firewall_custom", "http_ratelimit"):
+        rs, rules = entrypoint(zid, phase)
+        print(f"== {phase} ({len(rules)} rules)")
+        for r in rules:
+            mark = "OURS" if str(r.get("description", "")).startswith(TAG) else "    "
+            print(f"  [{mark}] {r.get('description','(no description)')}")
+            print(f"         action={r.get('action')} ratelimit={r.get('ratelimit','-')}")
+            print(f"         {r.get('expression','')[:150]}")
+
+
+def payloads(existing_custom, existing_rl):
+    new_custom, rep_c = merged(existing_custom, CUSTOM_RULES)
+    new_rl, rep_r = merged(existing_rl, RATELIMIT_RULES)
+    return (new_custom, rep_c), (new_rl, rep_r)
+
+
+def cmd_dry_run() -> None:
+    print("payloads that `apply` would PUT (foreign rules preserved byte-for-byte):\n")
+    for phase, ours in (("http_request_firewall_custom", CUSTOM_RULES),
+                        ("http_ratelimit", RATELIMIT_RULES)):
+        print(f"--- PUT /zones/<zone>/rulesets/phases/{phase}/entrypoint")
+        print(json.dumps({"rules": ours}, indent=1)[:2400])
+        print()
+
+
+def put_phase(zid: str, phase: str, rs, rules):
+    if rs is None:
+        return api_soft("PUT", f"/zones/{zid}/rulesets/phases/{phase}/entrypoint", {"rules": rules})
+    return api_soft("PUT", f"/zones/{zid}/rulesets/{rs['id']}", {"rules": rules})
+
+
+def cmd_apply(zid: str, yes: bool) -> None:
+    for phase, ours in (("http_request_firewall_custom", CUSTOM_RULES),
+                        ("http_ratelimit", RATELIMIT_RULES)):
+        rs, existing = entrypoint(zid, phase)
+        new_rules, replaced = merged(existing, ours)
+        print(f"{phase}: {len(existing)} existing ({replaced} of ours replaced) -> {len(new_rules)}")
+        if not yes:
+            print("  (dry run — re-run with --yes to write)")
+            continue
+        attempts = [new_rules]
+        if phase == "http_ratelimit":
+            # A Free zone allows exactly ONE rate-limiting rule of period 10 s and rejects
+            # geo fields, so degrade gracefully instead of failing the whole run.
+            first = [r for r in new_rules
+                     if str(r.get("description", "")).startswith(TAG)][:1]
+            short = [dict(r, ratelimit=dict(r["ratelimit"], mitigation_timeout=60)) for r in first]
+            attempts += [short]
+        for i, rules in enumerate(attempts):
+            code, out = put_phase(zid, phase, rs, rules)
+            if out.get("success"):
+                ids = [r.get("id") for r in (out.get("result") or {}).get("rules", [])]
+                print(f"  -> success: {len(rules)} rule(s) written (ids {ids})")
+                break
+            print(f"  attempt {i + 1} rejected: HTTP {code} {json.dumps(out.get('errors'))[:200]}")
+        else:
+            print("  !! nothing written for this phase — the zone is unchanged for it")
+    print("\nverify with: cf-edge-rules list")
+
+
+def cmd_rollback(zid: str, yes: bool) -> None:
+    for phase in ("http_request_firewall_custom", "http_ratelimit"):
+        rs, existing = entrypoint(zid, phase)
+        if rs is None:
+            continue
+        keep = [r for r in existing if not str(r.get("description", "")).startswith(TAG)]
+        dropped = len(existing) - len(keep)
+        print(f"{phase}: dropping {dropped} of our rules, keeping {len(keep)} foreign")
+        if yes:
+            out = api("PUT", f"/zones/{zid}/rulesets/{rs['id']}", {"rules": keep})
+            print(f"  -> success={out.get('success')}")
+
+
+def main() -> None:
+    mode = sys.argv[1] if len(sys.argv) > 1 else "plan"
+    yes = "--yes" in sys.argv
+    if mode == "dry-run":
+        return cmd_dry_run()
+    zid = zone_id()
+    if mode == "plan":
+        cmd_plan(zid)
+    elif mode == "list":
+        cmd_list(zid)
+    elif mode == "apply":
+        cmd_apply(zid, yes)
+    elif mode == "rollback":
+        cmd_rollback(zid, yes)
+    else:
+        sys.exit(f"unknown mode {mode!r} (plan|list|dry-run|apply|rollback)")
+
+
+if __name__ == "__main__":
+    main()

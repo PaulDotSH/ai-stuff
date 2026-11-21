@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""cg-parse — turn Caddy's JSON access log into per-IP findings for the country-guard worker.
+
+Reads one or more access-log files (or `-` for stdin) and prints JSON:
+    {"window": [first_ts, last_ts], "ips": {"1.2.3.4": {...}, ...}, "lines": N, "dropped": N}
+
+Per IP: total requests, first/last seen, status histogram, distinct-URI count, the
+URI families that indicate scanning (scanner paths, auth endpoints), method mix, user
+agent(s), the Cloudflare-visible country (Cf-Ipcountry) and the trusted-proxy verdict.
+
+Trust rule (important): with Cloudflare in front, a request's *socket* peer is a CF edge
+and Caddy writes the resolved visitor into request.client_ip. A visitor-supplied
+CF-Connecting-Ip header could also be honoured (trusted_proxies_strict covers this), so an
+entry is only treated as a real client when the log line came from a Cloudflare address.
+Requests whose client_ip is a private/loopback address (LAN, the box itself, health
+checks) are marked internal and ignored by the scorer.
+"""
+from __future__ import annotations
+
+import ipaddress
+import json
+import sys
+from collections import Counter, defaultdict
+
+SCAN_HINTS = ("/.env", "/.git", ".php", "wp-admin", "wp-login", "wp-content", "/vendor/",
+              "/phpmyadmin", "/.aws", "/.ssh", "/cgi-bin", "/xmlrpc.php", "/.well-known/pki-validation",
+              "/config.json", "/server-status", "/actuator", "/.DS_Store", "/backup", ".sql",
+              "admin", "/login", "/auth", "/api/v1/login", "/s/")
+ACME = "/.well-known/acme-challenge/"
+PRIVATE = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+                                             "127.0.0.0/8", "169.254.0.0/16", "100.64.0.0/10",
+                                             "::1/128", "fc00::/7", "fe80::/10")]
+
+
+def internal(ip: str) -> bool:
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return True
+    return any(a in n for n in PRIVATE)
+
+
+def family(uri: str) -> str:
+    u = uri.split("?")[0]
+    for h in SCAN_HINTS:
+        if h in u:
+            return h
+    return "other"
+
+
+def main(argv):
+    files = argv or ["-"]
+    agg: dict[str, dict] = defaultdict(lambda: {
+        "n": 0, "first": None, "last": None, "status": Counter(), "uris": set(),
+        "fams": Counter(), "methods": Counter(), "ua": Counter(), "cc": Counter(),
+        "hosts": Counter(), "internal": False})
+    lines = dropped = 0
+    for path in files:
+        fh = sys.stdin if path == "-" else open(path, "r", errors="replace")
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                dropped += 1
+                continue
+            req = rec.get("request") or {}
+            ip = (req.get("client_ip") or "").split(",")[0].strip()
+            if not ip:
+                dropped += 1
+                continue
+            lines += 1
+            hdr = req.get("headers") or {}
+            ts = rec.get("ts")
+            e = agg[ip]
+            e["n"] += 1
+            if e["first"] is None or ts < e["first"]:
+                e["first"] = ts
+            if e["last"] is None or ts > e["last"]:
+                e["last"] = ts
+            e["status"][str(rec.get("status"))] += 1
+            uri = req.get("uri") or "/"
+            e["uris"].add(uri.split("?")[0][:120])
+            if ACME not in uri:
+                e["fams"][family(uri)] += 1
+            e["methods"][req.get("method") or "?"] += 1
+            ua = (hdr.get("User-Agent") or hdr.get("User-agent") or ["-"])[0]
+            e["ua"][ua[:80]] += 1
+            cc = (hdr.get("Cf-Ipcountry") or hdr.get("Cf-IpCountry") or ["-"])[0]
+            e["cc"][cc] += 1
+            e["hosts"][req.get("host") or "-"] += 1
+            e["internal"] = internal(ip)
+
+    out = {}
+    window = [None, None]
+    for ip, e in agg.items():
+        if window[0] is None or (e["first"] is not None and e["first"] < window[0]):
+            window[0] = e["first"]
+        if window[1] is None or (e["last"] is not None and e["last"] > window[1]):
+            window[1] = e["last"]
+        top_fams = e["fams"].most_common(4)
+        out[ip] = {"n": e["n"], "first": e["first"], "last": e["last"],
+                   "status": dict(e["status"]), "uris": len(e["uris"]),
+                   "fams": dict(top_fams), "methods": dict(e["methods"]),
+                   "ua": e["ua"].most_common(2), "cc": e["cc"].most_common(1)[0][0] if e["cc"] else "-",
+                   "hosts": dict(e["hosts"].most_common(3)), "internal": e["internal"]}
+    print(json.dumps({"window": window, "lines": lines, "dropped": dropped,
+                      "ips": out}, separators=(",", ":")))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

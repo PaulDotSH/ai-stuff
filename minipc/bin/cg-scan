@@ -1,0 +1,318 @@
+#!/usr/bin/env python3
+"""cg-scan — country-guard daily pipeline, run by the Hermes "Cyber analysis" cron.
+
+Steps (prints a compact JSON report on stdout, exit 0 unless something broke):
+  1. copy today's Caddy access log out of /var/log/caddy (root-only) and rotate yesterday's copy
+  2. parse -> per-IP findings (cg-parse)
+  3. score each external IP: scanner volume, scanner-path hits, auth-endpoint hits,
+     cloud-verified country (own ipdeny country maps - NOT the client-supplied header)
+  4. ban the clear-cut offenders into the Cloudflare "[hermes] banlist" rule (cf-banip)
+  5. record everything in state.json and optionally push a short ntfy summary (--notify)
+
+Anything in the "review" list is borderline: the agent reads it and may ban by hand with
+`cf-banip add <ip>` (documented rule: only clear-cut scanner / brute-force sources).
+
+Usage: cg-scan [--notify] [--dry-run]
+"""
+from __future__ import annotations
+
+import ipaddress
+import json
+import os
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+HOME = Path.home()
+BASE = HOME / "services/caddy-banip"
+LOGDIR = Path("/var/log/caddy")
+CACHE = BASE / "logcopy.log"
+STATE = BASE / "state.json"
+RANGES = HOME / "services/cloudflare/country-guard/ranges.json"
+CF_BANIP = HOME / ".local/bin/cf-banip"       # legacy Cloudflare tool, kept for manual use
+CADDY_BANIP = HOME / ".local/bin/caddy-banip"  # the live path: bans enforced by Caddy
+CG_PARSE = HOME / ".local/bin/cg-parse"
+NTFY = HOME / ".local/bin/ntfy-push"
+GATED = {"RU", "CN", "HK", "BY", "IR", "KP", "VN", "ID", "PK", "BD", "NG", "UA"}
+# Cloudflare's published edge ranges (same list as trusted_proxies in the Caddyfile).
+# A client_ip inside these means the request reached us from a CF edge without a usable
+# visitor IP - never a real attacker address, so it must never be banned.
+CF_RANGES = [ipaddress.ip_network(n) for n in (
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+    "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+    "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22")]
+# thresholds for an automatic ban (tuned 2026-10-28 on the known scan fleets)
+AUTO_MIN_REQ, AUTO_MIN_SCANHITS, AUTO_MIN_URIS = 3, 1, 2
+REVIEW_MIN_REQ = 10
+
+
+def sh(*argv, inp=None):
+    return subprocess.run(list(argv), capture_output=True, text=True, input=inp, timeout=180)
+
+
+def refresh_logcopy() -> Path:
+    """return the log copy to analyse.
+    The dir is caddy:caddy 0750 and the file root-only, and this host only lets sudo
+    authenticate as a top-level shell command - so the caller (cron prompt / cron job) does
+    `sudo -n cp /var/log/caddy/access.log <CACHE>` first and this function merely validates
+    it and falls back to the previous copy when the fresh one is unusable."""
+    BASE.mkdir(parents=True, exist_ok=True)
+    prev = CACHE.with_suffix(".prev")
+    ok = CACHE.exists() and CACHE.stat().st_size > 0
+    if ok:
+        try:
+            os.chmod(CACHE, 0o600)   # may be a root-owned copy; not fatal
+        except OSError:
+            pass
+        return CACHE
+    return prev if prev.exists() else CACHE
+
+
+def load_ranges():
+    if not RANGES.exists():
+        return {}
+    d = json.loads(RANGES.read_text())["countries"]
+    return {str(ipaddress.ip_network(c)): cc for cc, nets in d.items() for c in nets}
+
+
+def country_of(ip: str, table: dict) -> str:
+    a = ipaddress.ip_address(ip)
+    for net, cc in table.items():
+        if a in ipaddress.ip_network(net):
+            return cc
+    return "?"
+
+
+def score(e: dict, cc: str) -> tuple[int, list[str]]:
+    """0-100 confidence that this IP is a scanner/attacker, plus the reasons."""
+    pts, why = 0, []
+    fams = e["fams"]
+    scan_hits = sum(v for k, v in fams.items() if k != "other" and k != "/login" and k != "/s/" and k != "admin")
+    auth_hits = sum(v for k, v in e["fams"].items() if k in ("/login", "admin", "/s/"))
+    errs = sum(v for k, v in e["status"].items() if k.startswith("4") or k.startswith("5"))
+    if scan_hits:
+        pts += min(40, 15 + 5 * scan_hits)
+        why.append(f"{scan_hits} scanner-path hits")
+    if auth_hits:
+        pts += min(30, 10 * auth_hits)
+        why.append(f"{auth_hits} auth-endpoint hits")
+    if errs and errs >= max(3, e["n"] // 2):
+        pts += 20
+        why.append(f"{errs}/{e['n']} error responses")
+    if e["n"] >= 50:
+        pts += 20
+        why.append(f"{e['n']} requests")
+    elif e["n"] >= 10:
+        pts += 10
+        why.append(f"{e['n']} requests")
+    if e["uris"] >= AUTO_MIN_URIS:
+        pts += 5
+    if cc in GATED:
+        pts += 15
+        why.append(f"country {cc} (gated)")
+    return min(100, pts), why
+
+
+def ro_ranges() -> list:
+    """RO whitelist from the country-guard table: never ban, never widen into it.
+    Same exception file as caddy-banip, so both agree on what counts as RO."""
+    if not RANGES.exists():
+        return []
+    try:
+        wl = json.loads(RANGES.read_text()).get("whitelist", {})
+    except json.JSONDecodeError:
+        return []
+    exc_path = HOME / "services/caddy-banip/ro_exceptions.json"
+    exempt = []
+    if exc_path.exists():
+        try:
+            exempt = [ipaddress.ip_network(n) for n in json.loads(exc_path.read_text()).get("ranges", [])]
+        except (json.JSONDecodeError, ValueError):
+            exempt = []
+    out = []
+    for nets in wl.values():
+        for n in nets:
+            try:
+                net = ipaddress.ip_network(n)
+            except ValueError:
+                continue
+            if any(net.subnet_of(e) or net.overlaps(e) for e in exempt if e.version == net.version):
+                continue
+            out.append(net)
+    return out
+
+
+def ro_hit(net, wl) -> str | None:
+    for r in wl:
+        if net.version == r.version and net.overlaps(r):
+            return str(r)
+    return None
+
+
+def ban_targets(ban_ips: list[str], wl: list) -> tuple[list[str], list[str]]:
+    """/24 hygiene: one offending IP -> /32, 2+ offenders in the same /24 -> the whole /24
+    (scanning fleets rotate inside their rented block). Never wider than /24. Romanian
+    space is untouchable: a /24 that overlaps RO is never used, and RO IPs are skipped."""
+    groups: dict[str, list[str]] = {}
+    skipped = []
+    for ip in ban_ips:
+        try:
+            a = ipaddress.ip_address(ip)
+        except ValueError:
+            skipped.append(f"{ip}:bad-address")
+            continue
+        if a.version != 4:
+            skipped.append(f"{ip}:ipv6")
+            continue
+        net = ipaddress.ip_network(f"{ip}/32", strict=False)
+        if ro_hit(net, wl):
+            skipped.append(f"{ip}:RO")
+            continue
+        groups.setdefault(str(ipaddress.ip_network(f"{ip}/24", strict=False)), []).append(ip)
+    out = []
+    for net24, members in groups.items():
+        n24 = ipaddress.ip_network(net24)
+        if len(members) >= 2 and not ro_hit(n24, wl):
+            out.append(net24)
+        else:
+            out.extend(f"{m}/32" for m in members)
+    return out, skipped
+
+
+WARN_ENTRIES, HARD_ENTRIES = 1000, 5000   # Caddy scans the ban list linearly per request
+HINT_AT = "250"
+
+
+def banlist_sizes() -> dict:
+    """size of the live ban list and the size warning the ntfy message must carry."""
+    st_path = HOME / "services/caddy-banip/bans.json"
+    snip = Path("/etc/caddy/blocked_ips.caddy")
+    entries = 0
+    shelved = 0
+    if st_path.exists():
+        try:
+            data = json.loads(st_path.read_text())
+            shelved = len(data.get("entries") or {})
+            entries = len(data.get("live") or [])
+        except json.JSONDecodeError:
+            pass
+    kb = round(snip.stat().st_size / 1024, 1) if snip.exists() else 0.0
+    warn = "over" if entries >= HARD_ENTRIES else ("approaching" if entries >= WARN_ENTRIES else "ok")
+    hint = ""
+    if entries >= 250:
+        hint = (f"past {HINT_AT} entries - run CIDR coalescing (merge /24s) before it gets slower; "
+                f"Caddy's client_ip matcher is a linear scan")
+    return {"entries": entries, "listsafe": max(0, shelved - entries), "snippet_kb": kb,
+            "warn": warn, "warn_at": WARN_ENTRIES, "hint": hint}
+
+
+def main(argv) -> int:
+    notify = "--notify" in argv
+    dry = "--dry-run" in argv
+    src = refresh_logcopy()
+    if not src.exists():
+        print(json.dumps({"error": "no Caddy access log copy available", "tried": str(src)}))
+        return 1
+    r = sh("/usr/bin/python3", str(CG_PARSE), str(src))
+    if r.returncode != 0:
+        print(json.dumps({"error": "cg-parse failed", "stderr": r.stderr[-400:]}))
+        return 1
+    found = json.loads(r.stdout)
+    table = load_ranges()
+
+    ban_list, review, top, candidates = [], [], [], 0
+    skipped_kind = {"ipv6": 0, "cloudflare_edge": 0}
+    for ip, e in found["ips"].items():
+        if e["internal"]:
+            continue
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if addr.version == 6:
+            skipped_kind["ipv6"] += 1
+            continue
+        if any(addr in n for n in CF_RANGES):
+            skipped_kind["cloudflare_edge"] += 1
+            continue
+        candidates += 1
+        cc = country_of(ip, table)
+        e["cc_verified"] = cc
+        pts, why = score(e, cc)
+        e["score"], e["why"] = pts, why
+        top.append((pts, ip, e))
+        # auto-ban: clear-cut only - scanner paths / auth hammering, never single probes
+        clear = (e["n"] >= AUTO_MIN_REQ and pts >= 55) or (pts >= 70)
+        if clear:
+            ban_list.append(ip)
+        elif pts >= 30 or e["n"] >= REVIEW_MIN_REQ:
+            review.append(ip)
+
+    top.sort(key=lambda t: (-t[0], -t[2]["n"]))
+    targets, ro_skipped = ban_targets(ban_list, ro_ranges())
+    if targets and not dry:
+        res = sh("/usr/bin/python3", str(CADDY_BANIP), "add", *targets)
+        api = json.loads(res.stdout) if res.stdout.strip().startswith("{") else {"raw": res.stdout[-300:]}
+    else:
+        api = {"dry_run": True, "would_ban": targets}
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    state = json.loads(STATE.read_text()) if STATE.exists() else {"runs": []}
+    state["runs"] = (state.get("runs") or [])[-30:] + [{
+        "at": now, "lines": found["lines"], "candidates": candidates, "banned": ban_list,
+        "review": review, "top": [{"ip": ip, "score": e["score"], "n": e["n"], "cc": e["cc"],
+                                  "why": e["why"]} for _, ip, e in top[:10]]}]
+    BASE.mkdir(parents=True, exist_ok=True)
+    STATE.write_text(json.dumps(state, indent=1))
+
+    lines = []
+    sizes = banlist_sizes()
+    if targets:
+        live = api.get("live_in_snippet", 0) if isinstance(api, dict) else 0
+        lines.append(f"**caddy banlist**: {len(targets)} target(s) added at the origin "
+                     f"({live} live in the blocklist snippet)")
+        for ip in ban_list[:6]:
+            e = found["ips"][ip]
+            lines.append(f"- `{ip}` {e['cc']} · {e['n']} req · {e['score']}/100 · {', '.join(e['why'])}")
+    else:
+        lines.append("**caddy banlist**: no new auto-bans")
+    if sizes:
+        warn, hint = sizes["warn"], sizes["hint"]
+        line = (f"- list: {sizes['entries']} entries, {sizes['entries'] + sizes['listsafe']} total in state, "
+                f"{sizes['snippet_kb']} KB imported into every site block")
+        if warn == "over":
+            line = (f"- ⚠️ **banlist is big**: {sizes['entries']} live entries / {sizes['snippet_kb']} KB - "
+                    f"Caddy scans this list linearly on every request; time to switch to CIDR coalescing "
+                    f"or the plugin, decisions pending")
+        elif warn == "approaching":
+            line = (f"- banlist growing: {sizes['entries']} live entries / {sizes['snippet_kb']} KB "
+                    f"(warn at {sizes['warn_at']})")
+        lines.append(line)
+        if hint:
+            lines.append(f"- hint: {hint}")
+    if ro_skipped:
+        lines.append(f"- kept RO traffic untouched: {', '.join(ro_skipped[:6])}")
+    if review:
+        lines.append(f"- review: {', '.join(review[:8])}" + (" ..." if len(review) > 8 else ""))
+    review_f = [r for r in state["runs"][-1]["top"] if r["ip"] in review]
+    if review_f:
+        lines.append("- top: " + "; ".join(f"{r['ip']} {r['score']}/100 ({r['n']} req)" for r in review_f[:4]))
+
+    report = {"window": found["window"], "lines": found["lines"], "candidates": candidates,
+              "banned": ban_list, "review": review, "ban_api": api, "ro_skipped": ro_skipped,
+              "skipped": skipped_kind, "banlist": sizes, "top": state["runs"][-1]["top"]}
+    print(json.dumps(report, indent=1))
+
+    if notify and NTFY.exists():
+        body = "\n".join(lines)[:3500]
+        res = sh(str(NTFY), "-m", "-t", "Caddy banlist", "-p", "3", "-g", "shield", "security", body)
+        if res.returncode != 0:
+            print("ntfy push failed:", (res.stdout or res.stderr)[-200:], file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

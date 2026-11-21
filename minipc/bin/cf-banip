@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""cf-banip — ONE Cloudflare custom rule that blocks a growing list of banned IPs/CIDRs.
+
+Free plan reality (measured 2026-10-28 on zone foarte.top):
+  * 5 custom rules per zone, 4 already used -> this tool owns the single free slot,
+    described "[hermes] banlist" (zone-wide block).
+  * The expression cap is 4096 chars, so the ban list is newest-first and pruned past
+    that (~250 IPv4 /24s or ~310 single IPs). Pruned bans stay in the local state file and
+    come back automatically when space frees up (list shows them as "shelved").
+  * The IP-access-rules API ("Security > WAF > Tools" ban IP) and IP Lists are denied to
+    this token (error 10000) - hence one rule holding the whole list.
+  * Rulesets are edited with a single set-level PUT, so foreign rules and the other three
+    [hermes] rules are preserved byte-for-byte.
+
+Commands
+  add <ip|cidr> [...]     ban (rejects private/reserved ranges)
+  remove <ip|cidr> [...]  unban
+  list                    state + what is live in the rule now
+  check <ip>              is this IP covered by the live rule?
+  sync                    re-push local state (after a rollback or manual edit)
+  clear                   empty the rule, KEEP the local list
+  wipe                    empty the rule AND the local list
+
+Exit: 0 ok, 1 API error, 2 usage.
+"""
+from __future__ import annotations
+
+import ipaddress
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+STATE = Path.home() / "services/cf-banip/bans.json"
+TOKEN_FILES = [os.environ.get("CF_TOKEN_FILE"), str(Path.home() / ".hermes/cf-waf-token"),
+               "/etc/cloudflare-ddns/token"]
+ZONE = os.environ.get("CF_ZONE_ID", "1ab72a193742ec1e2f02d8615f4e267a")
+RULESET = os.environ.get("CF_RULESET_ID", "3fb0e8fb260543e4becf86ffb92ee258")
+BASE = f"https://api.cloudflare.com/client/v4/zones/{ZONE}/rulesets/{RULESET}"
+DESC = "[hermes] banlist"
+ACTION = "block"
+MAX_EXPR = 4096
+MAX_RULES = 5
+RESERVED = [ipaddress.ip_network(n) for n in (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+    "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4")]
+
+
+def token() -> str:
+    for f in TOKEN_FILES:
+        if f and Path(f).exists():
+            return Path(f).read_text().strip()
+    sys.exit("no Cloudflare token found")
+
+
+def api(method: str, url: str, body=None):
+    h = {"Authorization": f"Bearer {token()}"}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        h["Content-Type"] = "application/json"
+    try:
+        return json.load(urllib.request.urlopen(urllib.request.Request(url, data=data, method=method, headers=h)))
+    except urllib.error.HTTPError as e:
+        try:
+            return {"success": False, "errors": json.loads(e.read()).get("errors")}
+        except Exception:
+            return {"success": False, "errors": [{"message": f"HTTP {e.code}"}]}
+
+
+def norm(raw: str):
+    try:
+        n = ipaddress.ip_network(raw.strip(), strict=False)
+    except ValueError:
+        return None, "not-an-ip"
+    if n.version != 4:
+        return None, "ipv6-unsupported"
+    for r in RESERVED:
+        if n.subnet_of(r):
+            return None, "reserved"
+    return n, None
+
+
+def load() -> dict:
+    st = json.loads(STATE.read_text()) if STATE.exists() else {"entries": {}, "history": []}
+    st.setdefault("entries", {})
+    st.setdefault("history", [])
+    return st
+
+
+def save(st: dict):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(st, indent=1))
+    tmp.replace(STATE)
+
+
+def build_expr(entries: dict):
+    """newest-first, pruned to the 4096-char cap -> (expression, live_entries, bytes).
+    An entry that does not fit yet is retried after smaller ones, so a big /24 does not
+    push out the rest of the list."""
+    out, used = [], len("(ip.src in {})")
+    left = dict(sorted(entries.items(), key=lambda kv: kv[1], reverse=True))  # newest first
+    progress = True
+    while left and progress:  # prune-first-fit: a net that does not fit waits for round 2
+        progress = False
+        for net in list(left):
+            if used + len(net) + 1 > MAX_EXPR:
+                continue
+            out.append(net)
+            left.pop(net)
+            used += len(net) + 1
+            progress = True
+    return "(ip.src in {" + " ".join(out) + "})", out, used
+
+
+def live_rules():
+    return (api("GET", BASE).get("result") or {}).get("rules", [])
+
+
+def put_rules(rules):
+    return api("PUT", BASE, {"rules": [{"id": r["id"], "action": r["action"],
+                                        "expression": r["expression"],
+                                        "description": r["description"]} for r in rules]})
+
+
+def push(st: dict) -> dict:
+    cur = live_rules()
+    if not st["entries"]:
+        res = put_rules([r for r in cur if r["description"] != DESC])
+        st["active"], st["shelved"] = [], []
+        save(st)
+        res.update({"kept": 0, "bytes": 0, "pruned": 0})
+        return res
+    expr, kept, used = build_expr(st["entries"])
+    if any(r["description"] == DESC for r in cur):
+        for r in cur:
+            if r["description"] == DESC:
+                r.update(action=ACTION, expression=expr)
+        res = put_rules(cur)
+    else:
+        if len(cur) >= MAX_RULES:
+            return {"success": False, "errors": [{"message": "no free custom-rule slot"}]}
+        res = api("POST", BASE + "/rules", {"action": ACTION, "expression": expr, "description": DESC})
+    st["active"] = kept
+    st["shelved"] = [n for n in sorted(st["entries"]) if n not in kept]
+    save(st)
+    res.update({"kept": len(kept), "bytes": used, "pruned": len(st["entries"]) - len(kept)})
+    return res
+
+
+def report(res: dict, st: dict, **extra) -> str:
+    out = {"success": res.get("success"), "banned_total": len(st["entries"]),
+           "live_in_rule": len(st.get("active", [])), "shelved": len(st.get("shelved", [])),
+           "expression_bytes": res.get("bytes"), "cloudflare_errors": res.get("errors")}
+    out.update(extra)
+    return json.dumps(out, indent=1)
+
+
+def main(argv) -> int:
+    if not argv:
+        print(__doc__)
+        return 2
+    cmd, now = argv[0], datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    st = load()
+
+    if cmd in ("add", "remove"):
+        changed, bad = [], []
+        for raw in argv[1:]:
+            n, why = norm(raw)
+            if why:
+                bad.append(f"{raw}:{why}")
+                continue
+            key = str(n)
+            if cmd == "add" and key not in st["entries"]:
+                st["entries"][key] = now
+                changed.append(key)
+            if cmd == "remove" and key in st["entries"]:
+                st["entries"].pop(key)
+                changed.append(key)
+        st["history"] = st["history"][-49:] + [{"at": now, "cmd": cmd, "changed": changed,
+                                                "rejected": bad}]
+        res = push(st)
+        print(report(res, st, changed=changed, rejected=bad))
+        return 0 if res.get("success") else 1
+
+    if cmd == "list":
+        print(json.dumps({"banned_total": len(st["entries"]), "active": st.get("active", []),
+                          "shelved": st.get("shelved", []), "state": str(STATE),
+                          "last_change": st["history"][-1] if st["history"] else None}, indent=1))
+        return 0
+
+    if cmd == "check":
+        nets = [ipaddress.ip_network(n) for n in st.get("active", [])]
+        ip = ipaddress.ip_address(argv[1])
+        hit = [str(n) for n in nets if ip in n]
+        net24 = ipaddress.ip_network(f"{ip}/24", strict=False)
+        print(json.dumps({"ip": str(ip), "blocked_now": bool(hit), "by": hit,
+                          "net24": str(net24), "net24_banned": str(net24) in st["entries"],
+                          "exact_banned": f"{ip}/32" in st["entries"]}, indent=1))
+        return 0
+
+    if cmd == "sync":
+        res = push(st)
+        print(report(res, st))
+        return 0 if res.get("success") else 1
+
+    if cmd in ("clear", "wipe"):
+        keep = dict(st["entries"]) if cmd == "clear" else {}
+        st["entries"] = {}
+        res = push(st)
+        st["entries"] = keep
+        st["active"], st["shelved"] = [], sorted(keep)
+        save(st)
+        print(report(res, st, mode=cmd))
+        return 0 if res.get("success") else 1
+
+    print(f"unknown command {cmd}")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

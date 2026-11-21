@@ -29,6 +29,7 @@ ai-stuff/
       *.md                  # optional references
   tools/
     DEPLOY.md             # manifest of machine-local tools; rest is gitignored
+  minipc/                 # the home mini PC's own scripts, symlinked into place (see minipc/README.md)
   install.ps1               # Windows installer
   install.sh                # macOS/Linux installer
 ```
@@ -90,6 +91,9 @@ Use `-DryRun` / `--dry-run` to preview. `-Force` / `--force` overwrites.
 ## Rules
 
 - Do not commit secrets, tokens, or absolute personal paths to this repo.
+  Exception: `minipc/` holds host scripts whose paths are host-specific by
+  design. Secrets still never go there; they stay next to the scripts on the
+  host and are covered by `stack-backup.sh`.
 - Do not install skills into a harness from inside a skill; use the installer.
 - Prefer adding one well-scoped skill over many overlapping ones.
 - Test an install with `-DryRun` before changing a live harness directory.

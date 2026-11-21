@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# jocuri-deploy — pull, build, stamp, restart and verify jocuri.foarte.top.
+#
+# The cache-bust is applied to the BUILT files (web/dist), derived from a hash of
+# their own contents, so the upstream sources are never patched by hand. The
+# version only ever changes when the frontend actually changes, and there is
+# nothing to remember or bump. See references/live-room-probe.md in the
+# jocuri-deploy skill for the verification recipe.
+set -euo pipefail
+
+REPO="$HOME/services/jocuri-foarte-top"
+UNIT="jocuri-foarte-top.service"
+PUBLIC="https://jocuri.foarte.top"
+LOCAL="http://127.0.0.1:3031"
+FORCE=0
+[[ "${1:-}" == "--force" ]] && FORCE=1
+
+export PATH="$HOME/.hermes/node/bin:$HOME/.cargo/bin:$PATH"
+say() { printf '\n== %s\n' "$*"; }
+die() { printf '\nABORT: %s\n' "$*" >&2; exit 1; }
+cd "$REPO"
+
+# 0. never kill a live game silently. Room counters are not served over HTTP any
+#    more (docs/operations.md), so detect live sockets directly: a lobby or match
+#    always holds at least one established connection to :3031, while idle
+#    visitors hold none (Caddy health checks are sub-second blips).
+active=$(ss -Htn state established '( sport = :3031 )' | wc -l)
+if (( ${active:-0} > 0 && ! FORCE )); then
+  die "$active live socket(s) on :3031 — a lobby or match is running. Re-run with --force when nobody is playing."
+fi
+
+# 1. pull. The upstream remote force-pushes, and a deploy checkout must never
+#    carry local edits, so a dirty tree resets even when the merge would be a
+#    no-op (ff-only on an already-current HEAD leaves modified files in place).
+say "git fetch"
+git fetch --prune origin
+if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+  say "local edits present — resetting to origin/master"
+  git reset --hard origin/master
+elif git merge-base --is-ancestor HEAD origin/master; then
+  git merge --ff-only origin/master >/dev/null 2>&1 || git reset --hard origin/master
+else
+  say "remote rewrote history — resetting to origin/master"
+  git reset --hard origin/master
+fi
+git --no-pager log --oneline -1
+
+# 2. dependencies only when the lockfile changed.
+lockhash=$(sha256sum package-lock.json | cut -d' ' -f1)
+stamp="node_modules/.lockhash"
+if [[ ! -d node_modules || "$(cat "$stamp" 2>/dev/null || true)" != "$lockhash" ]]; then
+  say "npm ci"
+  npm ci --no-audit --no-fund
+  printf '%s' "$lockhash" > "$stamp"
+fi
+
+# 3. frontend first: web/dist is embedded into the binary with include_str!.
+say "npm run build && npm run typecheck"
+npm run build
+npm run typecheck
+
+# 4. stamp the BUILT assets with a content hash. Sources stay pristine.
+say "stamp web/dist"
+node - "$REPO" <<'NODE'
+const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
+const root = process.argv[2] + '/web/dist';
+const gameBundles = fs.readdirSync(root).filter(f => /-(controller|display)\.js$/.test(f));
+// Shell assets: app.js + style.css, plus theme.js (blocking theme-init script,
+// added upstream in a0b66bf). Derived from what the build actually emitted so a
+// newly added shell file fails loudly here instead of shipping unstamped.
+const staticShell = ['app.js', 'style.css'];
+if (fs.existsSync(path.join(root, 'theme.js'))) staticShell.push('theme.js');
+const bundles = [...staticShell, ...gameBundles];
+const version = crypto.createHash('sha256')
+  .update(bundles.map(f => fs.readFileSync(path.join(root, f))).reduce((a, b) => Buffer.concat([a, b]), Buffer.alloc(0)))
+  .digest('hex').slice(0, 8);
+
+const stamp = (file, expect) => {
+  const before = fs.readFileSync(file, 'utf8');
+  if (/\?v=[0-9a-f]{8}/.test(before)) throw Error(`${file} is already stamped`);
+  let n = 0;
+  const after = before.replace(/\/assets\/[A-Za-z0-9._-]+\.(?:js|css)/g, url => { n += 1; return `${url}?v=${version}`; });
+  if (n !== expect) throw Error(`${file}: stamped ${n} asset URLs, expected ${expect}`);
+  fs.writeFileSync(file, after);
+  return n;
+};
+const indexBefore = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+const htmlExpected = (indexBefore.match(/\/assets\/[A-Za-z0-9._-]+\.(?:js|css)/g) || []).length;
+const html = stamp(path.join(root, 'index.html'), htmlExpected);
+const js = stamp(path.join(root, 'app.js'), gameBundles.length);
+const stampedApp = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+for (const bundle of gameBundles) {
+  if (!stampedApp.includes(`/assets/${bundle}?v=${version}`)) throw Error(`app.js never references ${bundle} (game registered but unreachable?)`);
+}
+for (const f of ['index.html', 'app.js']) {
+  const text = fs.readFileSync(path.join(root, f), 'utf8');
+  if (/\.js\.js|\?v=[0-9a-f]{8}\?v=/.test(text)) throw Error(`${f} contains a doubled extension or double stamp`);
+}
+console.log(`   version ${version} — index.html ${html} URLs, app.js ${js} bundle URLs (${gameBundles.length / 2} games)`);
+fs.writeFileSync('/tmp/.jocuri-version', version);
+NODE
+version=$(cat /tmp/.jocuri-version); rm -f /tmp/.jocuri-version
+
+# 5. build and restart.
+say "cargo build --release"
+cargo build --release -p party-server --locked
+say "install to /opt/jocuri/bin"
+cp -f /opt/jocuri/bin/party-server /opt/jocuri/bin/party-server.prev 2>/dev/null || true
+install -m 0755 target/release/party-server /opt/jocuri/bin/party-server.new
+mv -f /opt/jocuri/bin/party-server.new /opt/jocuri/bin/party-server
+say "restarting $UNIT"
+boot_before=$(curl -sf "$LOCAL/readyz" | grep -o '"boot_id":"[a-f0-9]*"' | cut -d'"' -f4 || true)
+systemctl --user restart "$UNIT"
+for _ in $(seq 1 30); do
+  boot_after=$(curl -sf "$LOCAL/readyz" 2>/dev/null | grep -o '"boot_id":"[a-f0-9]*"' | cut -d'"' -f4 || true)
+  [[ -n "${boot_after:-}" && "$boot_after" != "$boot_before" ]] && break
+  sleep 0.5
+done
+[[ -n "${boot_after:-}" && "$boot_after" != "$boot_before" ]] || die "service did not come back with a new boot_id"
+systemctl --user is-active "$UNIT" >/dev/null || die "$UNIT is not active"
+
+# 6. verify against the PUBLIC url — the same path the browsers take.
+say "verify $PUBLIC"
+games=$(curl -sf "$LOCAL/api/v1/catalog" | grep -o '"id":' | wc -l)
+(( games >= 5 )) || die "catalog lists ${games} games"
+
+html=$(curl -sf "$PUBLIC/")
+grep -q "app.js?v=$version" <<<"$html" || die "public index.html does not carry v=$version"
+grep -q "style.css?v=$version" <<<"$html" || die "public index.html does not carry the stylesheet version"
+
+curl -sf "$PUBLIC/assets/app.js?v=$version" -o /tmp/.jocuri-app.js
+urls=$(grep -o '/assets/[A-Za-z0-9._-]*\.js?v=[0-9a-f]*' /tmp/.jocuri-app.js | sort -u)
+count=$(wc -l <<<"$urls")
+expected=$(ls web/dist | grep -cE -- '-(controller|display)\.js$')
+(( count == expected )) || die "app.js references ${count} bundles, expected ${expected} (one per game bundle in web/dist)"
+grep -q '\.js\.js' <<<"$urls" && die "a bundle URL has a doubled .js"
+rm -f /tmp/.jocuri-app.js
+
+# Shell assets (app.js, style.css, theme.js when the build emits it) must also
+# come back byte-identical — index.html referencing a 404 theme.js would ship a
+# broken first paint that the bundle loop above never touches.
+for f in app.js style.css theme.js; do
+  [[ -f "web/dist/$f" ]] || continue
+  body=$(mktemp)
+  code=$(curl -s -o "$body" -w '%{http_code}' "$PUBLIC/assets/$f?v=$version")
+  [[ "$code" == 200 ]] || { rm -f "$body"; die "/assets/$f?v=$version -> HTTP $code"; }
+  [[ "$(sha256sum "$body" | cut -d' ' -f1)" == "$(sha256sum "web/dist/$f" | cut -d' ' -f1)" ]] \
+    || { rm -f "$body"; die "/assets/$f does not match web/dist/$f"; }
+  rm -f "$body"
+done
+
+# Every bundle the browser will ask for must exist AND come back byte-identical to
+# the file we just built. This is the check that would have caught both the
+# doubled-extension outage and the 0-byte edge-cache poisoning.
+while read -r url; do
+  name=${url#/assets/}; name=${name%%\?*}
+  body=$(mktemp)
+  code=$(curl -s -o "$body" -w '%{http_code}' "$PUBLIC$url")
+  [[ "$code" == 200 ]] || { rm -f "$body"; die "$url -> HTTP $code"; }
+  size=$(wc -c < "$body")
+  (( size > 1000 )) || { rm -f "$body"; die "$url -> ${size} bytes (empty body?)"; }
+  [[ "$(sha256sum "$body" | cut -d' ' -f1)" == "$(sha256sum "web/dist/$name" | cut -d' ' -f1)" ]] \
+    || { rm -f "$body"; die "$url does not match web/dist/$name (stale or poisoned edge entry?)"; }
+  rm -f "$body"
+done <<<"$urls"
+
+# Assets are content-versioned, so they stay cacheable: Cloudflare and the phones
+# serve repeat loads instead of re-fetching from :3031 (Caddy rewrites the header,
+# see the @static_assets note in the Caddyfile). If this disappears the CDN stops
+# helping; if index.html ever becomes cacheable, a deploy goes invisible instead.
+asset_headers=$(curl -sI "$PUBLIC/assets/app.js?v=$version")
+grep -qi 'cache-control: public, max-age=' <<<"$asset_headers" \
+  || die "assets are not cacheable any more — the @static_assets header override is missing from /etc/caddy/Caddyfile"
+html_headers=$(curl -sI "$PUBLIC/")
+grep -qi 'cache-control: private, no-store' <<<"$html_headers" \
+  || die "index.html became cacheable — a new deploy would not be picked up without a purge"
+grep -qi 'cf-cache-status: HIT' <<<"$html_headers" && die "index.html came from the edge cache"
+
+printf '\n== OK — v%s deployed, %s bundles verified byte-identical and cacheable, index.html stays no-store\n' "$version" "$count"
+printf '   boot_id %s\n' "$boot_after"
+if (( ${active:-0} > 0 )); then
+  printf '   note: the restart ended %s live socket(s) on :3031\n' "$active"
+fi
+
+# 7. keep the checkout lean — no stale build cache is left behind (2026-10-16).
+say "clean build cache"
+rm -rf target

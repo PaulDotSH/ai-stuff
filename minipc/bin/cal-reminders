@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# cal-reminders — push due calendar events/tasks to the phone via ntfy.
+#
+# Reads RustiCal over CalDAV, computes each item's reminder time from its VALARM
+# (falling back to --lead minutes), and pushes anything that has just come due.
+# Idempotent: each (uid, start) pair is pushed once, tracked in the state file.
+#
+#   cal-reminders                 # run: pushes due reminders
+#   cal-reminders --dry-run       # print what would be pushed
+#   cal-reminders --window 120 --lead 30
+#
+# Designed for a `*/10 * * * *` timer; no Python, no local calendar copy.
+set -euo pipefail
+
+CREDS=${CAL_CREDS:-$HOME/.hermes/rustical-creds.txt}
+BASE=${CAL_BASE:-https://calendar.foarte.top/caldav/principal/admin}
+STATE_DIR=${CAL_STATE:-$HOME/.local/state/cal-reminders}
+STATE=$STATE_DIR/notified
+TOPIC=${CAL_TOPIC:-hermes}
+WINDOW=180      # look this many minutes ahead
+LEAD=30         # default reminder lead when the event has no VALARM
+DRY=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY=1; shift;;
+    --window) WINDOW=$2; shift 2;;
+    --lead) LEAD=$2; shift 2;;
+    --state) STATE=$2; shift 2;;
+    *) echo "cal-reminders: unknown arg $1" >&2; exit 2;;
+  esac
+done
+
+mkdir -p "$STATE_DIR"; touch "$STATE"
+[ -f "$CREDS" ] || { echo "cal-reminders: no creds file $CREDS" >&2; exit 1; }
+TOKEN=$(awk '/app_token_agent-hermes/ {print $2}' "$CREDS")
+[ -n "$TOKEN" ] || { echo "cal-reminders: no agent-hermes token" >&2; exit 1; }
+
+now=$(date +%s)
+start_utc=$(date -u -d "@$now" +%Y%m%dT%H%M%SZ)
+end_utc=$(date -u -d "@$((now + WINDOW*60))" +%Y%m%dT%H%M%SZ)
+
+fetch() {  # $1 = collection, $2 = component (VEVENT|VTODO)
+  local col=$1 comp=$2
+  local time_range=""
+  if [ "$comp" = VEVENT ]; then
+    time_range="<C:time-range start=\"$start_utc\" end=\"$end_utc\"/>"
+  else
+    time_range=""
+  fi
+  curl -sS -u "admin:$TOKEN" -X REPORT -H 'Depth: 1' -H 'Content-Type: application/xml' \
+    --data "<?xml version=\"1.0\"?>
+<C:calendar-query xmlns:D=\"DAV:\" xmlns:C=\"urn:ietf:params:xml:ns:caldav\">
+  <D:prop><D:getetag/><C:calendar-data/></D:prop>
+  <C:filter><C:comp-filter name=\"VCALENDAR\"><C:comp-filter name=\"$comp\">$time_range</C:comp-filter></C:comp-filter></C:filter>
+</C:calendar-query>" "$BASE/$col/"
+}
+
+# Flatten the multistatus payload to one item per line:
+#   calendar-data is XML-escaped; unescape the few entities we need, then emit
+#   "UID<TAB>DTSTART-or-DUE<TAB>SUMMARY<TAB>TRIGGER" per component.
+parse() {
+  tr -d '\n' | sed -e 's/&#13;/\n/g' -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&quot;/"/g' -e 's/&amp;/\&/g' | awk '
+    /<[A-Za-z]*:calendar-data>/ { sub(/^.*<[A-Za-z]*:calendar-data>/, ""); incl = 1 }
+    incl {
+      if (/<\/[A-Za-z]*:calendar-data>/) { sub(/<\/[A-Za-z]*:calendar-data>.*/, ""); incl = 0 }
+      print
+    }
+  '
+}
+
+awk_emit='
+function flush() {
+  if (uid != "" && start != "" && summary != "") {
+    gsub(/\t/, " ", summary)
+    printf "%s\t%s\t%s\t%s\n", uid, start, summary, (lead == "" ? "" : lead)
+  }
+  uid=""; start=""; summary=""; lead=""
+}
+BEGIN { in_valarm=0 }
+/^BEGIN:VEVENT/ || /^BEGIN:VTODO/ { flush(); in_comp=1; next }
+/^END:VEVENT/ || /^END:VTODO/   { flush(); in_comp=0; next }
+!in_comp { next }
+/^BEGIN:VALARM/ { in_valarm=1; next }
+/^END:VALARM/   { in_valarm=0; next }
+/^UID:/     { if (!in_valarm) uid = substr($0, 5) }
+/^SUMMARY:/ { if (!in_valarm) summary = substr($0, 9) }
+/^DTSTART[;:]/ { if (!in_valarm && start == "") { start = $0; sub(/^DTSTART[^:]*:/, "", start) } }
+/^DUE[;:]/     { if (!in_valarm && start == "") { start = $0; sub(/^DUE[^:]*:/, "", start) } }
+in_valarm && /^TRIGGER[;:]/ {
+  t = $0; sub(/^TRIGGER[^:]*:/, "", t)
+  if (t ~ /^-P[0-9]+DT/) {          # -P0DT1H0M0S
+    split(t, a, "T"); d = a[1]; sub(/^-P/, "", d); sub(/D$/, "", d)
+    h = a[2]; sub(/H.*$/, "", h); m = a[2]; sub(/^.*H/, "", m); sub(/M.*$/, "", m)
+    lead = (d+0)*1440 + (h+0)*60 + (m+0)
+  } else if (t ~ /^-PT/) {          # -PT1H30M
+    h = t; sub(/^-PT/, "", h); m = h; sub(/H.*$/, "", h)
+    if (m ~ /H/) { sub(/^.*H/, "", m) } else { h = 0 }
+    sub(/M$/, "", m)
+    lead = (h+0)*60 + (m+0)
+  } else if (t ~ /^-P[0-9]+W$/) {
+    w = t; sub(/^-P/, "", w); sub(/W$/, "", w); lead = (w+0)*10080
+  } else if (t ~ /^-P[0-9]+D$/) {
+    d = t; sub(/^-P/, "", d); sub(/D$/, "", d); lead = (d+0)*1440
+  }
+}
+END { flush() }
+'
+
+pushed=0
+for pair in personal:VEVENT tasks:VTODO; do
+  col=${pair%%:*}; comp=${pair##*:}
+  fetch "$col" "$comp" | parse | awk "$awk_emit" | while IFS=$'\t' read -r uid dtstart summary trigger; do
+    # dtstart may be 20261021T052000Z, 20261021 (all-day) or 20261021T082000 (floating/local)
+    wo=${dtstart%Z}
+    if ! [[ $wo =~ ^[0-9]{8}T[0-9]{6}$ || $wo =~ ^[0-9]{8}$ ]]; then continue; fi
+    if [[ $wo =~ ^[0-9]{8}$ ]]; then
+      epoch=$(date -d "${wo:0:4}-${wo:4:2}-${wo:6:2} 09:00" +%s)   # all-day: 09:00 local
+    elif [[ $dtstart == *Z ]]; then
+      epoch=$(date -u -d "${wo:0:4}-${wo:4:2}-${wo:6:2} ${wo:9:2}:${wo:11:2}:${wo:13:2}" +%s)
+    else
+      epoch=$(date -d "${wo:0:4}-${wo:4:2}-${wo:6:2} ${wo:9:2}:${wo:11:2}:${wo:13:2}" +%s)
+    fi
+    lead=${trigger:-$LEAD}
+    due=$((epoch - lead*60))
+    key="$uid|$dtstart"
+    grep -qxF "$key" "$STATE" && continue
+    if [ "$now" -ge "$due" ] && [ "$now" -lt "$epoch" ]; then
+      when=$(date -d "@$epoch" '+%a %d %b %H:%M')
+      if [ "$DRY" = 1 ]; then
+        echo "[dry-run] would push: $when  $summary  (lead ${lead}m, uid $uid)"
+      else
+        ntfy-push -t "⏰ $when" -p 4 -g alarm_clock -c "https://calendar.foarte.top/frontend" "$TOPIC" "$summary" >/dev/null \
+          && echo "$key" >> "$STATE"
+        echo "pushed: $when  $summary"
+      fi
+      pushed=$((pushed+1))
+    fi
+  done
+done
+
+# prune state entries older than 7 days (keys are uid|DTSTART, no timestamp; keep the file small)
+if [ "$DRY" = 0 ]; then
+  tmp=$(mktemp); tail -n 500 "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+fi
+echo "cal-reminders: done ($(wc -l < "$STATE") state entries)"

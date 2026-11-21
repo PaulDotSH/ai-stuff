@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /home/minipc/invisible-playwright/.venv/bin/python "$@"

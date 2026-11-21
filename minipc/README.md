@@ -1,0 +1,49 @@
+# minipc
+
+Scripts that run on the home mini PC (Arch, user `minipc`). This folder is
+the source of truth for the code. On the mini PC it is checked out at
+`~/ai-stuff`, and every live path is a symlink into that checkout, so an edit
+on either side changes the same file.
+
+| Repo path                | Live path on the mini PC          |
+| ------------------------ | --------------------------------- |
+| `stack-backup.sh`        | `~/.local/bin/stack-backup.sh`    |
+| `bin/<name>`             | `~/.local/bin/<name>`             |
+| `services/<dir>/<file>`  | `~/services/<dir>/<file>`         |
+
+Only code lives here. State, configs and secrets stay next to the code on the
+mini PC (for example `~/services/watched-delete/config.json` and
+`jellyfin.token`), and `stack-backup.sh` copies them into the backup folder.
+Paths in these scripts are host-specific on purpose.
+
+## Setup / repair
+
+```bash
+git clone https://github.com/PaulDotSH/ai-stuff ~/ai-stuff
+bash ~/ai-stuff/minipc/link.sh          # creates the symlinks
+bash ~/ai-stuff/minipc/link.sh --check  # reports anything unlinked or drifted
+```
+
+`link.sh` replaces a live file only when it is identical to the repo copy. A
+live file that differs is reported as `DRIFTED` and left alone. This usually
+means an editor saved it with write-then-rename, which turns the symlink back
+into a plain file. Copy the live file over the repo one, commit it, then run
+`link.sh` again.
+
+Syncing with other machines is plain git: `git -C ~/ai-stuff pull` on the
+mini PC after pushing from elsewhere, and commit/push from wherever an edit
+was made.
+
+## stack-backup.sh
+
+This builds a single migration-ready folder at `~/backup/stack-migration`
+containing configs, secrets, databases and state for the self-hosted stack.
+The root-only groups need sudo, so run it from an interactive SSH session:
+
+```bash
+ssh -t minipc@192.168.0.226 stack-backup.sh
+```
+
+`latest-backup.txt` records when it last ran and whether the run was
+complete. `inventory.txt` lists listening ports, containers, enabled units,
+the ai-stuff commit and any script that has drifted from its symlink.

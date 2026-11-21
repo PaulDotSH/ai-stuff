@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""cg-report — compact text for the ntfy push from a cg-scan report (stdin, file or --file).
+
+Reads the JSON that `cg-scan` prints, so the cron prompt stays short and the wording stable.
+Always emits the banlist size line (the list drives a linear scan inside Caddy), and flags it
+loudly once it passes the warn threshold.
+"""
+import json
+import sys
+
+args = [a for a in sys.argv[1:] if a not in ("-",)]
+if not args or args[0] == "-":
+    r = json.load(sys.stdin)
+else:
+    with open(args[0]) as fh:
+        r = json.load(fh)
+
+lines = []
+api = r.get("ban_api") or {}
+targets = api.get("changed") or api.get("would_ban") or []
+if targets:
+    lines.append(f"**caddy bans**: {', '.join(targets[:8])}"
+                 + (f" (+{len(targets) - 8} more)" if len(targets) > 8 else ""))
+else:
+    lines.append("**caddy bans**: none added")
+
+bl = r.get("banlist") or {}
+if bl:
+    entries = bl.get("entries", 0)
+    warn = bl.get("warn", "ok")
+    size = f"{entries} live entries, {bl.get('snippet_kb', 0)} KB blocklist"
+    if warn == "over":
+        lines.append(f"- ⚠️ **banlist is BIG**: {size} (warn ≥{bl.get('warn_at')}) — Caddy scans it "
+                     f"linearly per request; time to decide on CIDR coalescing / plugin")
+    elif warn == "approaching":
+        lines.append(f"- ⚠️ banlist growing: {size} (warn ≥{bl.get('warn_at')})")
+    else:
+        lines.append(f"- banlist: {size}")
+    if bl.get("hint"):
+        lines.append(f"- note: {bl['hint']}")
+
+for t in r.get("top", [])[:5]:
+    if t.get("score", 0) < 30:
+        continue
+    lines.append(f"- `{t['ip']}` {t['cc'] or '-'} · {t['n']} req · {t['score']}/100 · "
+                 + (", ".join(t["why"]) or "no clear markers"))
+if r.get("ro_skipped"):
+    lines.append(f"- RO left alone: {', '.join(x.split(':')[0] for x in r['ro_skipped'][:5])}")
+print("\n".join(lines)[:3500])
