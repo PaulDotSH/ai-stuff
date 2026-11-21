@@ -6,9 +6,10 @@
 #                    a live file that DIFFERS is left alone and reported)
 #   link.sh --check  report only; exit 1 if anything is not linked (stack-backup.sh runs this)
 #
-# Mapping:  bin/<f>         -> ~/.local/bin/<f>
+# Mapping:  bin/<f>          -> ~/.local/bin/<f>
 #           services/<d>/<f> -> ~/services/<d>/<f>   (state/config/secrets stay in ~/services, never here)
-#           stack-backup.sh -> ~/.local/bin/stack-backup.sh
+#           stack-backup.sh  -> ~/.local/bin/stack-backup.sh
+#           + the EXTRA pairs below (live files whose code is a skill's script in ai-stuff)
 #
 # Editors that save by write-temp-then-rename replace a symlink with a plain file;
 # --check catches that as "drifted": copy the live file over the repo one, then re-run link.sh.
@@ -18,18 +19,21 @@ MH="${STACK_OWNER_HOME:-/home/minipc}"
 CHECK=0; [ "${1:-}" = "--check" ] && CHECK=1
 bad=0
 
-target_for() {
-  case "$1" in
-    bin/*)           echo "$MH/.local/bin/${1#bin/}";;
-    services/*)      echo "$MH/$1";;
-    stack-backup.sh) echo "$MH/.local/bin/stack-backup.sh";;
-  esac
+# <path relative to minipc/> <live path>
+EXTRA="../skills/jellyfin-watched-delete/scripts/watched_delete.py $MH/services/watched-delete/watched_delete.py"
+
+pairs() {
+  cd "$REPO" || exit 1
+  find bin -type f | while IFS= read -r f; do echo "$f $MH/.local/${f}"; done
+  find services -type f ! -name '*.pyc' | while IFS= read -r f; do echo "$f $MH/$f"; done
+  echo "stack-backup.sh $MH/.local/bin/stack-backup.sh"
+  echo "$EXTRA"
 }
 
-cd "$REPO"
-while IFS= read -r rel; do
-  src="$REPO/$rel"; dst="$(target_for "$rel")"
-  [ -n "$dst" ] || continue
+while read -r rel dst; do
+  [ -n "${dst:-}" ] || continue
+  src="$(readlink -f "$REPO/$rel")"
+  [ -f "$src" ] || { echo "MISSING  repo file $rel"; bad=1; continue; }
   if [ -L "$dst" ] && [ "$(readlink -f "$dst")" = "$src" ]; then
     continue
   elif [ -e "$dst" ] && ! cmp -s "$src" "$dst"; then
@@ -39,5 +43,5 @@ while IFS= read -r rel; do
   else
     mkdir -p "$(dirname "$dst")" && ln -sfn "$src" "$dst" && echo "linked   $dst -> $rel"
   fi
-done < <(find bin services -type f ! -name '*.pyc' 2>/dev/null; echo stack-backup.sh)
+done < <(pairs)
 exit "$bad"

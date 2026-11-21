@@ -10,6 +10,10 @@ on either side changes the same file.
 | `stack-backup.sh`        | `~/.local/bin/stack-backup.sh`    |
 | `bin/<name>`             | `~/.local/bin/<name>`             |
 | `services/<dir>/<file>`  | `~/services/<dir>/<file>`         |
+| `../skills/jellyfin-watched-delete/scripts/watched_delete.py` | `~/services/watched-delete/watched_delete.py` |
+
+Code that already ships as a skill script is linked to that copy (the `EXTRA`
+list in `link.sh`), so the repo holds one copy of it, not two.
 
 Only code lives here. State, configs and secrets stay next to the code on the
 mini PC (for example `~/services/watched-delete/config.json` and
