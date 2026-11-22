@@ -30,6 +30,7 @@ ai-stuff/
   tools/
     DEPLOY.md             # manifest of machine-local tools; rest is gitignored
   minipc/                 # the home mini PC's own scripts, symlinked into place (see minipc/README.md)
+  notes/                  # facts about the home setup that agents need (3d-printer.md)
   install.ps1               # Windows installer
   install.sh                # macOS/Linux installer
 ```

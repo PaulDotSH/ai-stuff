@@ -318,7 +318,7 @@ copy_unprivileged() {
   # every ~/services dir without a git remote, minus ones handled above and clef-classify (models)
   for d in "$MH/services"/*/; do
     s=$(basename "$d")
-    case "$s" in rustical|silverbullet|stalwart|trawl-data|clef-classify) continue;; esac
+    case "$s" in rustical|silverbullet|stalwart|trawl-data|clef-classify|spoolman) continue;; esac
     [ -e "$d/.git" ] && continue
     mkdir -p "$B/configs/local-services/$s"
     rsync -a --delete --exclude '*.py' --exclude '__pycache__/' --exclude '*.log' --exclude '*.log.*' \
@@ -382,6 +382,19 @@ copy_unprivileged() {
     fi
   else
     echo "  (skip rustical — $MH/services/rustical not found)"
+  fi
+
+  echo "== spoolman (filament spool inventory: sqlite snapshot; run.sh is in ai-stuff/minipc) =="
+  if [ -e "$MH/services/spoolman/data/spoolman.db" ]; then
+    mkdir -p "$B/databases/spoolman"
+    # live SQLite: .backup gives a consistent standalone file (a plain cp can miss the WAL)
+    if sqlite3 "$MH/services/spoolman/data/spoolman.db" ".backup '$B/databases/spoolman/spoolman.db'" 2>/dev/null; then
+      echo "  db: $(du -h "$B/databases/spoolman/spoolman.db" | cut -f1) (integrity: $(sqlite3 "$B/databases/spoolman/spoolman.db" 'PRAGMA integrity_check;' 2>/dev/null | head -1))"
+    else
+      echo "  (WARN: sqlite3 .backup failed — spoolman NOT captured)"
+    fi
+  else
+    echo "  (skip spoolman — $MH/services/spoolman/data/spoolman.db not found)"
   fi
 
   echo "== notes (Hermes findings + research reports) =="
