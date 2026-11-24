@@ -60,6 +60,4 @@ the ai-stuff commit and any script that has drifted from its symlink.
 
 ## ext.to magnet engine (ext-magnet)
 
-- Code: `~/services/ext-magnet/` (`ext_magnet.py` CLI, `extto.py` qBittorrent engine, `README.md`). Run the CLI with `~/invisible-playwright/.venv/bin/python`.
-- Search goes through trawl (`127.0.0.1:8191`). Magnets come from the detail page's button, which posts to `/ajax/getTorrentMagnet.php`.
-- Installed: `~/.local/share/qBittorrent/nova3/engines/extto.py` is a symlink to the file above.
+Code: `minipc/services/ext-magnet/` (linked by `link.sh`). Setup, uBO copy and the qBittorrent engine symlink are in `minipc/services/ext-magnet/README.md`.
