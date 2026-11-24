@@ -51,3 +51,9 @@ ssh -t minipc@192.168.0.226 stack-backup.sh
 `latest-backup.txt` records when it last ran and whether the run was
 complete. `inventory.txt` lists listening ports, containers, enabled units,
 the ai-stuff commit and any script that has drifted from its symlink.
+
+## Browser tooling (invisible-playwright)
+
+- `~/invisible-playwright` is the stealth Firefox with the Playwright API (venv `.venv`, wrapper `invpw` from `minipc/bin`). It is not in git; reinstall with `uv pip install --python ~/invisible-playwright/.venv/bin/python -U invisible-playwright`, then `~/.local/bin/invisible-playwright fetch` to restore the engine.
+- Host-side browser steps need headless mode (`headless=True`) and run as user `minipc`.
+- uBlock Origin is shipped in the trawl container at `/opt/camoufox/addons/UBO`. Host use copies it to `~/services/ext-magnet/ublock`; this is planned and not verified yet.
