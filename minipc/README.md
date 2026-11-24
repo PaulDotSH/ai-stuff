@@ -56,4 +56,10 @@ the ai-stuff commit and any script that has drifted from its symlink.
 
 - `~/invisible-playwright` is the stealth Firefox with the Playwright API (venv `.venv`, wrapper `invpw` from `minipc/bin`). It is not in git; reinstall with `uv pip install --python ~/invisible-playwright/.venv/bin/python -U invisible-playwright`, then `~/.local/bin/invisible-playwright fetch` to restore the engine.
 - Host-side browser steps need headless mode (`headless=True`) and run as user `minipc`.
-- uBlock Origin is shipped in the trawl container at `/opt/camoufox/addons/UBO`. Host use copies it to `~/services/ext-magnet/ublock`; this is planned and not verified yet.
+- uBlock Origin is shipped in the trawl container at `/opt/camoufox/addons/UBO`. `~/services/ext-magnet/ublock` is a host copy. It loads with `--ublock` (profile + xpi). It does not filter page traffic; the request allowlist does the blocking.
+
+## ext.to magnet engine (ext-magnet)
+
+- Code: `~/services/ext-magnet/` (`ext_magnet.py` CLI, `extto.py` qBittorrent engine, `README.md`). Run the CLI with `~/invisible-playwright/.venv/bin/python`.
+- Search goes through trawl (`127.0.0.1:8191`). Magnets come from the detail page's button, which posts to `/ajax/getTorrentMagnet.php`.
+- Installed: `~/.local/share/qBittorrent/nova3/engines/extto.py` is a symlink to the file above.
